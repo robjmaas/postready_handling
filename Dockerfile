@@ -34,10 +34,6 @@ FROM base
 # Copy built application
 COPY --from=build /app /app
 
-# Copy entrypoint script
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
-
 # Setup sqlite3 on a separate volume
 RUN mkdir -p /data
 VOLUME /data
@@ -45,4 +41,4 @@ VOLUME /data
 # Start the server by default, this can be overwritten at runtime
 EXPOSE 3000
 ENV DATABASE_URL="file:///data/sqlite.db"
-ENTRYPOINT [ "/app/docker-entrypoint.sh" ]
+CMD [ "npm", "run", "start" ]

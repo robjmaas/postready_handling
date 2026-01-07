@@ -15,10 +15,6 @@ primary_region = 'ams'
   auto_extend_size_increment = '1GB'
   auto_extend_size_limit = '10GB'
 
-[[mounts]]
-  source = 'secrets'
-  destination = '/run/secrets'
-
 [http_service]
   internal_port = 3000
   force_https = true
