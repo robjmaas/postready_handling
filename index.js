@@ -24,6 +24,7 @@ const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
 const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || "";
 const CUBE_LUT_URL = process.env.CUBE_LUT_URL || "";
+const COCONUT_WEBHOOK_URL = `http://127.0.0.1:${PORT}/webhooks/coconut`;
 
 /* ==================== DATABASE SETUP ==================== */
 let db;
