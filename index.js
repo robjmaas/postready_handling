@@ -527,6 +527,115 @@ app.post("/sync/wasabi-frameio", async (req, res) => {
 });
 
 /**
+ * Database Management Endpoints
+ */
+
+/**
+ * GET /db/stats - Database statistics
+ */
+app.get("/db/stats", async (req, res) => {
+  try {
+    const transfers = await db.all("SELECT COUNT(*) as count FROM processed_transfers");
+    const jobs = await db.all("SELECT COUNT(*) as count FROM coconut_jobs");
+    const completedJobs = await db.all("SELECT COUNT(*) as count FROM coconut_jobs WHERE status = ?", ["completed"]);
+    const failedJobs = await db.all("SELECT COUNT(*) as count FROM coconut_jobs WHERE status = ?", ["failed"]);
+    
+    res.json({
+      processed_transfers: transfers[0].count,
+      total_jobs: jobs[0].count,
+      completed_jobs: completedJobs[0].count,
+      failed_jobs: failedJobs[0].count,
+      processing_jobs: jobs[0].count - completedJobs[0].count - failedJobs[0].count
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/transfers - View all processed transfers
+ */
+app.get("/db/transfers", async (req, res) => {
+  try {
+    const transfers = await db.all("SELECT * FROM processed_transfers ORDER BY created_at DESC");
+    res.json(transfers);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/jobs - View all Coconut jobs
+ */
+app.get("/db/jobs", async (req, res) => {
+  try {
+    const jobs = await db.all("SELECT * FROM coconut_jobs ORDER BY created_at DESC");
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/jobs/:transferId - View jobs for a specific transfer
+ */
+app.get("/db/jobs/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const jobs = await db.all(
+      "SELECT * FROM coconut_jobs WHERE transfer_id = ? ORDER BY created_at DESC",
+      [transferId]
+    );
+    res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /db/transfer/:transferId - Remove a transfer from processed list (allows reprocessing)
+ */
+app.delete("/db/transfer/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    await db.run("DELETE FROM processed_transfers WHERE id = ?", [transferId]);
+    res.json({ success: true, message: `Transfer ${transferId} removed - can be reprocessed`, transferId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /db/job/:jobId - Remove a Coconut job
+ */
+app.delete("/db/job/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    await db.run("DELETE FROM coconut_jobs WHERE id = ?", [jobId]);
+    res.json({ success: true, message: `Job ${jobId} removed`, jobId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /db/clear - Clear all database entries (use with caution!)
+ */
+app.delete("/db/clear", async (req, res) => {
+  try {
+    await db.run("DELETE FROM coconut_jobs");
+    await db.run("DELETE FROM processed_transfers");
+    res.json({ 
+      success: true, 
+      message: "⚠️  All database entries cleared",
+      warning: "This action cannot be undone"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * Webhook endpoint to handle Coconut job callbacks
  */
 app.post("/webhooks/coconut", async (req, res) => {
