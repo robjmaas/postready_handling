@@ -101,6 +101,7 @@ const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
 const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || ""; // Set via env var
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || ""; // Set via env var
 const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
+const CUBE_LUT_URL = process.env.CUBE_LUT_URL || ""; // Optional cube LUT for color grading
 
 // Debug: Log loaded API keys on startup
 console.log("🔍 Checking environment variables on startup:");
@@ -108,6 +109,7 @@ console.log(`   - FILEMAIL_API_KEY: ${FILEMAIL_API_KEY ? '✅ SET' : '❌ MISSIN
 console.log(`   - COCONUT_API_KEY: ${COCONUT_API_KEY ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - FRAMEIO_TOKEN: ${FRAMEIO_TOKEN ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - FRAMEIO_PROJECT_ID: ${FRAMEIO_PROJECT_ID ? '✅ SET' : '❌ MISSING'}`);
+console.log(`   - CUBE_LUT_URL: ${CUBE_LUT_URL ? '✅ SET (color grading enabled)' : '⚪ NOT SET (optional)'}`);
 
 if (!FILEMAIL_API_KEY) {
   console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set - make sure FLY_API_TOKEN is set in GitHub Secrets!");
@@ -234,14 +236,16 @@ async function processFilemailTransfer(transferId) {
 
 async function sendToCoconut(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  console.log("Sending to Coconut:", downloadUrl, safeFilename);  
+  console.log("Sending to Coconut:", downloadUrl, safeFilename);
+  console.log(`${CUBE_LUT_URL ? '🎨 Applying cube LUT' : '⚪ No LUT applied'}`);\
+  
   const payload = {
     input: { url: downloadUrl },
     storage: {
       service: "wasabi",
       bucket: "strawberries",
       region: "eu-central-1",
-      path: `/${safeFilename}.mp4`,       // top-level path relative to bucket
+      path: `/${safeFilename}.mp4`,
       credentials: {
           'access_key_id': 'BVH9EMMKPXKS8W50LDV2',
           'secret_access_key': 'daRvOFjpbeJ9DHKlzJ4RQOBA5AdNjpOXkuksA9pM'
@@ -253,7 +257,15 @@ async function sendToCoconut(downloadUrl, filename) {
     },
     outputs: {
       mp4: {
-        path: `/${safeFilename}.mp4`
+        path: `/${safeFilename}.mp4`,
+        // Apply cube LUT if provided
+        ...(CUBE_LUT_URL && {
+          effects: {
+            lut: {
+              url: CUBE_LUT_URL
+            }
+          }
+        })
       }
     }
   };   

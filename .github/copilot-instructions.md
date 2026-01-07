@@ -116,7 +116,28 @@ FRAMEIO_TOKEN=your_frameio_token
 FRAMEIO_PROJECT_ID=your_project_id
 PORT=3000
 DEPLOYMENT_URL=https://postready-handling.fly.dev
+
+# Optional: Cube LUT for color grading
+CUBE_LUT_URL=https://example.com/path/to/your_lut.cube
 ```
+
+### Color Grading with Cube LUT
+
+To apply a cube LUT (color grade) to all processed videos:
+
+1. Upload your `.cube` LUT file to a web-accessible URL
+2. Set the `CUBE_LUT_URL` environment variable:
+   ```
+   CUBE_LUT_URL=https://example.com/my_color_grade.cube
+   ```
+3. All videos will now be processed with the LUT applied
+
+**Supported LUT formats:** `.cube` files (3D LUT format)
+
+**Example LUT files:**
+- Rec.709 to DCI-P3
+- Log to Rec.709 color space conversions
+- Creative color grades (vintage, cinema, etc.)
 
 ### Processing Flow
 
