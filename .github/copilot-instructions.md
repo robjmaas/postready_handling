@@ -121,6 +121,23 @@ PUT /db/settings/lut
 Body: `{ "cube_lut_url": "https://example.com/lut.cube" }`
 Updates the LUT URL without restarting the server.
 
+Example:
+```bash
+curl -X PUT http://127.0.0.1:3000/db/settings/lut \
+  -H "Content-Type: application/json" \
+  -d '{"cube_lut_url": "https://example.com/new_color_grade.cube"}'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "🎨 Cube LUT URL updated",
+  "cube_lut_url": "https://example.com/new_color_grade.cube",
+  "note": "New LUT will be applied to videos processed after this update"
+}
+```
+
 #### Remove Cube LUT (Disable Color Grading)
 ```bash
 DELETE /db/settings/lut
@@ -144,12 +161,33 @@ CUBE_LUT_URL=https://example.com/path/to/your_lut.cube
 
 To apply a cube LUT (color grade) to all processed videos:
 
+**Option 1: Use Remote URL**
+
 1. Upload your `.cube` LUT file to a web-accessible URL
 2. Set the `CUBE_LUT_URL` environment variable:
    ```
    CUBE_LUT_URL=https://example.com/my_color_grade.cube
    ```
 3. All videos will now be processed with the LUT applied
+
+**Option 2: Upload Local Cube File**
+
+1. Upload a `.cube` file via API:
+   ```bash
+   curl -X POST http://127.0.0.1:3000/lut/upload \
+     -H "x-filename: my_color_grade.cube" \
+     --data-binary @my_color_grade.cube
+   ```
+
+2. List available cube files:
+   ```bash
+   curl http://127.0.0.1:3000/lut/list
+   ```
+
+3. Delete a cube file:
+   ```bash
+   curl -X DELETE http://127.0.0.1:3000/lut/my_color_grade.cube
+   ```
 
 **Supported LUT formats:** `.cube` files (3D LUT format)
 

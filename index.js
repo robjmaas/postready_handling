@@ -5,8 +5,25 @@ import dotenv from "dotenv";
 import coconut from "coconutjs";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
+import fs from "fs";
+import path from "path";
 
 dotenv.config({ quiet: true });   // <— no output
+
+// Create luts directory if it doesn't exist
+const lutsDir = "./luts";
+if (!fs.existsSync(lutsDir)) {
+  fs.mkdirSync(lutsDir, { recursive: true });
+}
+
+/* ==================== ENVIRONMENT VARIABLES ==================== */
+const PORT = process.env.PORT || 3000;
+const DEPLOYMENT_URL = process.env.DEPLOYMENT_URL || "https://postready-handling.fly.dev";
+const FILEMAIL_API_KEY = process.env.FILEMAIL_API_KEY || "";
+const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
+const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
+const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || "";
+const CUBE_LUT_URL = process.env.CUBE_LUT_URL || "";
 
 /* ==================== DATABASE SETUP ==================== */
 let db;
@@ -84,9 +101,6 @@ await initDb();
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const DEPLOYMENT_URL = process.env.DEPLOYMENT_URL || "https://postready-handling.fly.dev";
-
 // Health check endpoint for deployment
 app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
@@ -106,14 +120,6 @@ const server = app.listen(PORT, "127.0.0.1", () => {
   console.log(`Server running on http://127.0.0.1:${PORT}`);
   console.log("⚠️  Local only - not accessible from remote connections");
 });
-// https://postready-handling.fly.dev/webhooks/coconut
-
-const FILEMAIL_API_KEY = process.env.FILEMAIL_API_KEY || "";
-const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
-const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || ""; // Set via env var
-const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || ""; // Set via env var
-const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
-const CUBE_LUT_URL = process.env.CUBE_LUT_URL || ""; // Optional cube LUT for color grading
 
 // Debug: Log loaded API keys on startup
 console.log("🔍 Checking environment variables on startup:");
@@ -731,6 +737,105 @@ app.delete("/db/settings/lut", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * POST /lut/upload - Upload a local cube LUT file
+ * Requires multipart form data with 'file' field
+ */
+app.post("/lut/upload", express.raw({ type: 'application/octet-stream', limit: '50mb' }), async (req, res) => {
+  try {
+    const filename = req.headers['x-filename'];
+    
+    if (!filename) {
+      return res.status(400).json({ error: "Missing x-filename header" });
+    }
+
+    if (!filename.toLowerCase().endsWith('.cube')) {
+      return res.status(400).json({ error: "File must be a .cube file" });
+    }
+
+    const filepath = path.join(lutsDir, path.basename(filename));
+    fs.writeFileSync(filepath, req.body);
+
+    const localUrl = `http://127.0.0.1:${PORT}/luts/${path.basename(filename)}`;
+    
+    // Save to database
+    await db.run(
+      "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+      ["cube_lut_url", localUrl]
+    );
+
+    res.json({
+      success: true,
+      message: "🎨 Cube LUT file uploaded",
+      filename: path.basename(filename),
+      url: localUrl,
+      note: "LUT will be applied to videos processed after this upload"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /lut/list - List all uploaded cube LUT files
+ */
+app.get("/lut/list", (req, res) => {
+  try {
+    const files = fs.readdirSync(lutsDir).filter(f => f.toLowerCase().endsWith('.cube'));
+    const luts = files.map(f => ({
+      filename: f,
+      url: `http://127.0.0.1:${PORT}/luts/${f}`,
+      size: fs.statSync(path.join(lutsDir, f)).size
+    }));
+
+    res.json({
+      total: luts.length,
+      luts
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /lut/:filename - Delete a cube LUT file
+ */
+app.delete("/lut/:filename", async (req, res) => {
+  try {
+    const filename = path.basename(req.params.filename);
+    
+    if (!filename.toLowerCase().endsWith('.cube')) {
+      return res.status(400).json({ error: "File must be a .cube file" });
+    }
+
+    const filepath = path.join(lutsDir, filename);
+    
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    fs.unlinkSync(filepath);
+
+    // If this was the current LUT, remove it from settings
+    const setting = await db.get("SELECT value FROM settings WHERE key = ?", ["cube_lut_url"]);
+    if (setting?.value?.includes(filename)) {
+      await db.run("DELETE FROM settings WHERE key = ?", ["cube_lut_url"]);
+    }
+
+    res.json({
+      success: true,
+      message: `🗑️ Cube LUT file deleted: ${filename}`
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Serve cube LUT files statically
+ */
+app.use('/luts', express.static(lutsDir));
 
 /**
  * Webhook endpoint to handle Coconut job callbacks
