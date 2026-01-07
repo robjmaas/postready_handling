@@ -149,7 +149,14 @@ server.on("listening", () => {
       // Process each transfer
       for (const t of transfersall) {
         console.log("Transfer ID:", t.id);
-        console.log("Portal:", t.customfields[0].value);
+        const portal = t.customfields?.[0]?.value || "Unknown";
+        console.log("Portal:", portal);
+        
+        // Only process transfers from "Strawberries" portal
+        if (portal.toLowerCase() !== "strawberries") {
+          console.log("Skipping transfer - not from Strawberries portal:", portal);
+          continue;
+        }
         
         // Check if already processed
         if (await isTransferProcessed(t.id)) {
