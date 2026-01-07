@@ -179,6 +179,15 @@ async function getFilemailFiles(transferId) {
 
 /* ==================== 4. PROCESS A FILEMAIL TRANSFER ==================== */
 
+/**
+ * Check if a file is a video file
+ */
+function isVideoFile(filename) {
+  const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ogv', '.ts', '.m2ts', '.mts'];
+  const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
+  return videoExtensions.includes(ext);
+}
+
 async function processFilemailTransfer(transferId) {
   console.log("Processing Filemail transfer:", transferId);
   console.log("Fetching Filemail files...");
@@ -186,6 +195,11 @@ async function processFilemailTransfer(transferId) {
   console.log("Found files:", files);
 
   for (const file of files) {
+    // Only process video files
+    if (!isVideoFile(file.filename)) {
+      console.log("Skipping non-video file:", file.filename);
+      continue;
+    }
     
     console.log("Creating Coconut job for:", file.filename);
     try {
