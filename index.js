@@ -90,7 +90,10 @@ app.get("/webhooks/coconut", (req, res) => {
   });
 });
 
-const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const server = app.listen(PORT, "127.0.0.1", () => {
+  console.log(`Server running on http://127.0.0.1:${PORT}`);
+  console.log("⚠️  Local only - not accessible from remote connections");
+});
 // https://postready-handling.fly.dev/webhooks/coconut
 
 const FILEMAIL_API_KEY = process.env.FILEMAIL_API_KEY || "";
