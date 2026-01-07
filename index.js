@@ -346,7 +346,6 @@ async function storeCoconutJob(jobId, transferId, filename) {
     [jobId, transferId, filename, "pending"]
   );
 }
-}
 
 /**
  * Update Coconut job status
