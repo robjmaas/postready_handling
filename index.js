@@ -80,6 +80,16 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
 });
 
+// Ping endpoint for webhook verification
+app.get("/webhooks/coconut", (req, res) => {
+  res.status(200).json({ 
+    status: "ok", 
+    webhook: "coconut",
+    ready: true,
+    message: "POST a Coconut job webhook to this endpoint"
+  });
+});
+
 const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // https://postready-handling.fly.dev/webhooks/coconut
 
@@ -409,14 +419,17 @@ app.post("/sync/wasabi-frameio", async (req, res) => {
  */
 app.post("/webhooks/coconut", async (req, res) => {
   try {
+    console.log("Coconut webhook received:", JSON.stringify(req.body, null, 2));
+    
     const { job } = req.body;
 
     if (!job || !job.id) {
       console.error("Invalid Coconut webhook payload:", req.body);
-      return res.status(400).json({ error: "Missing job id" });
+      // Return 200 anyway so Coconut doesn't retry
+      return res.status(200).json({ error: "Missing job id", received: req.body });
     }
 
-    console.log(`Coconut webhook received for job ${job.id}:`, job.status);
+    console.log(`Processing Coconut job ${job.id}:`, job.status);
 
     // Determine final status
     let status = "processing";
@@ -455,10 +468,11 @@ app.post("/webhooks/coconut", async (req, res) => {
         });
     }
     
-    // Return success immediately (don't wait for Frame.io upload)
-    res.json({ success: true, jobId: job.id, status });
+    // Return 200 success (don't wait for Frame.io upload)
+    res.status(200).json({ success: true, jobId: job.id, status });
   } catch (err) {
     console.error("Webhook error:", err);
-    res.status(500).json({ error: err.message });
+    // Still return 200 so Coconut doesn't retry endlessly
+    res.status(200).json({ success: false, error: err.message });
   }
 });
