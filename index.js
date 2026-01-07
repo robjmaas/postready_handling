@@ -55,6 +55,17 @@ async function markTransferProcessed(transferId) {
   await db.run("INSERT OR IGNORE INTO processed_transfers (id, status) VALUES (?, ?)", [transferId, "processing"]);
 }
 
+/**
+ * Check if a job already exists for this transfer and filename
+ */
+async function jobExists(transferId, filename) {
+  const row = await db.get(
+    "SELECT id FROM coconut_jobs WHERE transfer_id = ? AND filename = ?",
+    [transferId, filename]
+  );
+  return row !== undefined;
+}
+
 // Initialize database on startup
 await initDb();
 
@@ -197,6 +208,12 @@ async function processFilemailTransfer(transferId) {
     // Only process video files
     if (!isVideoFile(file.filename)) {
       console.log("Skipping non-video file:", file.filename);
+      continue;
+    }
+    
+    // Check if job already exists (avoid duplicate Coconut submissions)
+    if (await jobExists(transferId, file.filename)) {
+      console.log("Job already exists for:", file.filename, "- skipping to avoid duplicate cost");
       continue;
     }
     
