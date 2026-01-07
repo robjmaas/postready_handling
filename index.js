@@ -141,6 +141,12 @@ export async function getInboxTransfers() {
 server.on("listening", () => {
   console.log("Server is ready, starting transfer sync...");
   
+  // Skip transfer sync if API key is not set
+  if (!FILEMAIL_API_KEY) {
+    console.warn("⚠️  Skipping transfer sync - FILEMAIL_API_KEY is not yet available");
+    return;
+  }
+  
   getInboxTransfers()
     .then(async (transfers) => {
       console.log(transfers.data.transfers)
