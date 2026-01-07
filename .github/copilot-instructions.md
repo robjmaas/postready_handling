@@ -214,6 +214,8 @@ To apply a cube LUT (color grade) to all processed videos:
 - ✅ **Database Tracking**: SQLite persists all transfers and job statuses
 - ✅ **Webhook Handling**: Auto-uploads to Frame.io on Coconut completion
 - ✅ **Local-Only**: Server bound to 127.0.0.1, not publicly accessible
+- ✅ **Timecode Burning**: Automatically burns in timecode from source video
+- ✅ **Color Grading**: Optional cube LUT for professional color grading
 
 ### File Extensions Supported
 `.mp4` `.mov` `.avi` `.mkv` `.flv` `.wmv` `.webm` `.m4v` `.3gp` `.ogv` `.ts` `.m2ts` `.mts` `.vob` `.rm` `.rmvb` `.divx` `.xvid` `.mxf`

@@ -270,6 +270,7 @@ async function sendToCoconut(downloadUrl, filename) {
   const lutUrl = await getLutUrl();
   
   console.log("Sending to Coconut:", downloadUrl, safeFilename);
+  console.log(`⏱️  Timecode burning enabled`);
   console.log(`${lutUrl ? '🎨 Applying cube LUT' : '⚪ No LUT applied'}`);
   
   const payload = {
@@ -291,14 +292,18 @@ async function sendToCoconut(downloadUrl, filename) {
     outputs: {
       mp4: {
         path: `/${safeFilename}.mp4`,
-        // Apply cube LUT if provided
-        ...(lutUrl && {
-          effects: {
+        effects: {
+          // Burn in timecode from original file
+          timecode: {
+            mode: "source"
+          },
+          // Apply cube LUT if provided
+          ...(lutUrl && {
             lut: {
               url: lutUrl
             }
-          }
-        })
+          })
+        }
       }
     }
   };   
