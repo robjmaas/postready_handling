@@ -1,0 +1,18 @@
+{
+  "name": "Postready",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "index.js",
+  "dependencies": {
+    "coconutjs": "^3.0.4",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "sqlite": "^5.0.1",
+    "sqlite3": "^5.1.6"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js"
+  }
+}
