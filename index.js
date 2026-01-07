@@ -95,7 +95,13 @@ const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || ""; // Set via env var
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || ""; // Set via env var
 const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
 
-// Debug: Log if API keys are loaded
+// Debug: Log loaded API keys on startup
+console.log("🔍 Checking environment variables on startup:");
+console.log(`   - FILEMAIL_API_KEY: ${FILEMAIL_API_KEY ? '✅ SET' : '❌ MISSING'}`);
+console.log(`   - COCONUT_API_KEY: ${COCONUT_API_KEY ? '✅ SET' : '❌ MISSING'}`);
+console.log(`   - FRAMEIO_TOKEN: ${FRAMEIO_TOKEN ? '✅ SET' : '❌ MISSING'}`);
+console.log(`   - FRAMEIO_PROJECT_ID: ${FRAMEIO_PROJECT_ID ? '✅ SET' : '❌ MISSING'}`);
+
 if (!FILEMAIL_API_KEY) {
   console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set!");
 }
