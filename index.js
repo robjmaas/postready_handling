@@ -251,27 +251,12 @@ async function processFilemailTransfer(transferId) {
   console.log("Waiting for Coconut webhooks...");
 }
 
-/**
- * Get current LUT URL (from database or environment fallback)
- */
-async function getLutUrl() {
-  try {
-    const setting = await db.get("SELECT value FROM settings WHERE key = ?", ["cube_lut_url"]);
-    return setting?.value || CUBE_LUT_URL || "";
-  } catch (err) {
-    return CUBE_LUT_URL || "";
-  }
-}
-
-/* ==================== COCO ==================== */
+/* ==================== COCONUT ==================== */
 
 async function sendToCoconut(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  const lutUrl = await getLutUrl();
   
   console.log("Sending to Coconut:", downloadUrl, safeFilename);
-  console.log(`⏱️  Timecode burning enabled`);
-  console.log(`${lutUrl ? '🎨 Applying cube LUT' : '⚪ No LUT applied'}`);
   
   const payload = {
     input: { url: downloadUrl },
@@ -291,19 +276,7 @@ async function sendToCoconut(downloadUrl, filename) {
     },
     outputs: {
       mp4: {
-        path: `/${safeFilename}.mp4`,
-        effects: {
-          // Burn in timecode from original file
-          timecode: {
-            mode: "source"
-          },
-          // Apply cube LUT if provided
-          ...(lutUrl && {
-            lut: {
-              url: lutUrl
-            }
-          })
-        }
+        path: `/${safeFilename}.mp4`
       }
     }
   };   
