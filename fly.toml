@@ -23,6 +23,11 @@ primary_region = "ord"
   cpus = 2
   memory_mb = 1024
 
+[mounts]
+  source = "data"
+  destination = "/data"
+  initial_size = "5gb"
+
 [checks]
   [checks.status]
     type = "http"
