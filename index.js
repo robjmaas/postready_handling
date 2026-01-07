@@ -143,45 +143,9 @@ export async function getInboxTransfers() {
 
 // Start fetching transfers asynchronously after server is ready
 server.on("listening", () => {
-  console.log("Server is ready, starting transfer sync...");
-  
-  // Skip transfer sync if API key is not set
-  if (!FILEMAIL_API_KEY) {
-    console.warn("⚠️  Skipping transfer sync - FILEMAIL_API_KEY is not yet available");
-    return;
-  }
-  
-  getInboxTransfers()
-    .then(async (transfers) => {
-      console.log(transfers.data.transfers)
-      const transfersall = transfers.data.transfers; // <-- the actual array
-      console.log("Transfers found:", transfersall.length);
-      // Process each transfer
-      for (const t of transfersall) {
-        console.log("Transfer ID:", t.id);
-        const portal = t.customfields?.[0]?.value || "Unknown";
-        console.log("Portal:", portal);
-        
-        // Only process transfers from "Strawberries" portal
-        if (portal.toLowerCase() !== "strawberries") {
-          console.log("Skipping transfer - not from Strawberries portal:", portal);
-          continue;
-        }
-        
-        // Check if already processed
-        if (await isTransferProcessed(t.id)) {
-          console.log("Transfer already processed, skipping:", t.id);
-          continue;
-        }
-        
-        // Mark as processing to avoid duplicates
-        await markTransferProcessed(t.id);
-        processFilemailTransfer(t.id);
-      }
-    })
-    .catch(err => {
-      console.error("Error syncing transfers:", err);
-    });
+  console.log("Server is ready");
+  console.log("⚠️  Auto-processing disabled - use /api/process to manually trigger transfers");
+  // Auto-processing disabled - use /api/process endpoint instead
 });
 
 /* ==================== 1. GET FILES FROM FILEMAIL ==================== */
@@ -220,6 +184,19 @@ async function processFilemailTransfer(transferId) {
   console.log("Fetching Filemail files...");
   const files = await getFilemailFiles(transferId);
   console.log("Found files:", files);
+
+  // Filter to video files only
+  const videoFiles = files.filter(f => isVideoFile(f.filename));
+  
+  // Show summary before processing
+  console.log("\n" + "=".repeat(60));
+  console.log("📋 TRANSFER SUMMARY");
+  console.log("=".repeat(60));
+  console.log(`Transfer ID: ${transferId}`);
+  console.log(`Total files: ${files.length}`);
+  console.log(`Video files to process: ${videoFiles.length}`);
+  console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
+  console.log("=".repeat(60) + "\n");
 
   for (const file of files) {
     // Only process video files
@@ -368,6 +345,138 @@ async function updateCoconutJob(jobId, status, outputUrl = null, error = null) {
     [status, outputUrl, error, completedAt, jobId]
   );
 }
+
+/**
+ * Preview endpoint - show what will be processed without actually processing
+ */
+app.get("/preview/transfer/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    console.log(`Preview request for transfer: ${transferId}`);
+    
+    const files = await getFilemailFiles(transferId);
+    const videoFiles = files.filter(f => isVideoFile(f.filename));
+    const nonVideoFiles = files.filter(f => !isVideoFile(f.filename));
+    
+    res.json({
+      transferId,
+      summary: {
+        totalFiles: files.length,
+        videoFiles: videoFiles.length,
+        nonVideoFiles: nonVideoFiles.length
+      },
+      videos: videoFiles.map(f => ({
+        filename: f.filename,
+        downloadurl: f.downloadurl,
+        size: f.filesize
+      })),
+      skipped: nonVideoFiles.map(f => f.filename)
+    });
+  } catch (err) {
+    console.error("Preview error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Confirm and process a transfer - requires manual approval
+ */
+app.post("/process/transfer/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    console.log(`\n📌 PROCESSING STARTED FOR TRANSFER: ${transferId}`);
+    
+    // Check if already processed
+    if (await isTransferProcessed(transferId)) {
+      console.log("Transfer already processed, skipping:", transferId);
+      return res.json({ 
+        success: false, 
+        message: "Transfer already processed",
+        transferId 
+      });
+    }
+    
+    // Mark as processing to avoid duplicates
+    await markTransferProcessed(transferId);
+    
+    // Start processing
+    processFilemailTransfer(transferId);
+    
+    res.json({ 
+      success: true, 
+      message: "Transfer processing started",
+      transferId,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error("Process error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * List all pending Strawberries transfers ready for processing
+ */
+app.get("/inbox", async (req, res) => {
+  try {
+    const transfers = await getInboxTransfers();
+    const pending = transfers.data.transfers.filter(t => {
+      const portal = t.customfields?.[0]?.value || "Unknown";
+      return portal.toLowerCase() === "strawberries";
+    });
+
+    const result = await Promise.all(pending.map(async (t) => ({
+      transferId: t.id,
+      processed: await isTransferProcessed(t.id),
+      portal: t.customfields?.[0]?.value || "Unknown",
+      shootingDay: t.customfields?.[1]?.value || "N/A",
+      size: t.size,
+      files: t.numberoffiles,
+      url: `/preview/transfer/${t.id}`
+    })));
+
+    res.json({
+      total: pending.length,
+      pending: result.filter(r => !r.processed),
+      completed: result.filter(r => r.processed)
+    });
+  } catch (err) {
+    console.error("Inbox error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Preview endpoint - show what will be processed without actually processing
+ */
+app.get("/preview/transfer/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    console.log(`Preview request for transfer: ${transferId}`);
+    
+    const files = await getFilemailFiles(transferId);
+    const videoFiles = files.filter(f => isVideoFile(f.filename));
+    const nonVideoFiles = files.filter(f => !isVideoFile(f.filename));
+    
+    res.json({
+      transferId,
+      summary: {
+        totalFiles: files.length,
+        videoFiles: videoFiles.length,
+        nonVideoFiles: nonVideoFiles.length
+      },
+      videos: videoFiles.map(f => ({
+        filename: f.filename,
+        downloadurl: f.downloadurl,
+        size: f.filesize
+      })),
+      skipped: nonVideoFiles.map(f => f.filename)
+    });
+  } catch (err) {
+    console.error("Preview error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 /**
  * Manual sync endpoint - upload completed jobs from Wasabi to Frame.io
