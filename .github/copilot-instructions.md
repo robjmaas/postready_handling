@@ -1,63 +1,211 @@
 ## Postready — Copilot / AI agent instructions
 
-This repository is a small Node.js service that retrieves files from Filemail and prepares them for downstream processing (Coconut transcode, Dropbox upload). The single entry point is `index.js` (ES module). Use the guidance below to be productive quickly.
+Complete video processing pipeline: Filemail → Filemail (manual preview) → Coconut (transcoding) → Webhook → Frame.io (upload) + Wasabi (storage).
 
-### Big picture
-- index: `index.js` — an Express server that currently exposes a minimal setup and contains the `getFilemailFiles()` helper which fetches from Filemail and returns an array of {name, url}.
-- External integrations: Filemail (inbox API), Coconut (transcoding — commented webhook reference), and Dropbox (upload via access token).
-- Config: environment-driven via `.env` and `dotenv`. Required env names in code: `FILEMAIL_API_KEY`, `COCONUT_API_KEY`, `DROPBOX_ACCESS_TOKEN`, optional `PORT`.
+### Quick Start
+```bash
+node index.js  # Starts local-only server on http://127.0.0.1:3000
+```
 
-### Architectural notes & intent (from code)
-- The service is written as a lightweight worker/API (Express present but no routes are implemented yet). The primary flow is: fetch transfer list from Filemail → map to {name,url} → (intended) send to Coconut or upload to Dropbox.
-- `getFilemailFiles()` currently calls the Filemail public inbox endpoint and maps results to `{ name, url }`. It throws on non-OK responses (no retries).
-- There is a commented `WEBHOOK_URL` and an example `getFilemailFiles("6N2s9wDC")` call — appears to be a manual/test invocation that should either be removed or replaced with a proper scheduled handler / route.
+### Architecture Overview
+- **Express.js** server (local-only, port 3000)
+- **SQLite database** - tracks processed transfers and Coconut jobs
+- **Filemail API** - fetches inbox transfers from "Strawberries" portal
+- **Coconut API** - submits video transcoding jobs, receives webhooks
+- **Frame.io API** - uploads completed videos to project
+- **Wasabi S3** - stores transcoded MP4 files
 
-### Developer workflows (how to run & debug)
-1. Install dependencies (the project file currently has an empty `dependencies` block). The code requires at least:
-   - `express`
-   - `node-fetch` (or use Node 18+ built-in `fetch`) 
-   - `dotenv`
+### API Workflows
 
-   Example (run once):
+#### 1. View Pending Transfers
+```bash
+GET /inbox
+```
+Returns all pending Strawberries transfers ready for processing with file counts.
+Response shows which are already processed vs pending.
 
-   npm install express node-fetch dotenv
+#### 2. Preview Transfer Before Processing
+```bash
+GET /preview/transfer/{transferId}
+```
+Shows:
+- Total files in transfer
+- Video files to process (MP4, MOV, AVI, MKV, etc.)
+- Non-video files to skip
+- Download URLs for each video
 
-2. Provide credentials via a `.env` file in the repo root (do not commit secrets):
+Example:
+```bash
+curl http://127.0.0.1:3000/preview/transfer/erzvqthocijquce
+```
 
-   FILEMAIL_API_KEY=your_filemail_key
-   COCONUT_API_KEY=your_coconut_key
-   DROPBOX_ACCESS_TOKEN=your_dropbox_token
-   PORT=3000
+#### 3. Manually Confirm & Process Transfer
+```bash
+POST /process/transfer/{transferId}
+```
+Marks transfer as processing, creates Coconut jobs for all video files.
+Prevents duplicate Coconut submissions per file.
 
-3. Start the server (zsh/macOS):
+Example:
+```bash
+curl -X POST http://127.0.0.1:3000/process/transfer/erzvqthocijquce
+```
 
-   node index.js
+#### 4. Monitor Coconut Jobs
+Coconut automatically POSTs to:
+```
+POST /webhooks/coconut
+```
+- Receives job completion notifications
+- Updates database with status/output URL
+- Auto-uploads to Frame.io when complete
+- Always returns 200 (won't retry)
 
-   - If you prefer automatic reloads in development, add `nodemon` and a `dev` script in `package.json`.
+#### 5. Manual Sync Wasabi → Frame.io
+```bash
+POST /sync/wasabi-frameio
+```
+Uploads all completed Coconut jobs (in Wasabi) to Frame.io.
+Useful for re-syncing after Frame.io issues.
 
-### Project-specific patterns & conventions
-- ES modules: `package.json` uses `"type": "module"` — prefer `import`/`export` and avoid CommonJS `require()`.
-- Environment-first config: code reads secrets via `process.env` and uses `dotenv.config()` early in `index.js`.
-- Minimal error handling: functions tend to throw on non-OK responses. When expanding flows (Coconut/Dropbox), follow the same pattern but add retries and idempotency where external calls are non-atomic.
-- Keep external integration code in small, testable functions similar to `getFilemailFiles()` (input → output mapping). Example return shape to match: `{ name, url }`.
+### Database Management
 
-### Integration details to watch for (examples from code)
-- Filemail API: `https://api-public.filemail.com/transfer/inbox` and header `X-Filemail-ApiKey: <KEY>` — the current function expects the API response to include `files` with `filename` and `downloadurl`.
-- Coconut: referenced by `COCONUT_API_KEY` and a commented `WEBHOOK_URL` — expect an async transcode workflow (upload → webhook callback) rather than immediate sync responses.
-- Dropbox: token-based uploads via `DROPBOX_ACCESS_TOKEN` — implement chunked uploads for large files if needed.
+#### View Stats
+```bash
+GET /db/stats
+```
+Shows: processed_transfers, total_jobs, completed_jobs, failed_jobs, processing_jobs
 
-### Concrete tasks an AI agent can do first
-1. Remove or refactor the stray `getFilemailFiles("6N2s9wDC")` call — replace with a scheduled job, CLI command, or an Express route that triggers processing.
-2. Add proper `package.json` scripts: `start` -> `node index.js`, `dev` -> `nodemon index.js` (if using nodemon). Also add missing `dependencies`.
-3. Implement a Coconut integration function (upload URL or proxy the download) and a reliable webhook handler; include tests mocking HTTP responses.
-4. Add basic logging and error boundaries around external fetches; add retry/backoff for transient errors.
+#### View All Processed Transfers
+```bash
+GET /db/transfers
+```
 
-### Files to reference while working
-- `index.js` — main logic and examples (search for `getFilemailFiles`, `FILEMAIL_API_KEY`, `COCONUT_API_KEY`, `DROPBOX_ACCESS_TOKEN`).
-- `package.json` — currently minimal; update it when adding dependencies and scripts.
+#### View All Coconut Jobs
+```bash
+GET /db/jobs
+```
 
-### When to ask for human guidance
-- If credentials or third-party API behavior are required (e.g., exact Filemail inbox IDs, Coconut webhook URLs), ask the repo owner rather than guessing.
-- Before adding or committing any secrets or CI credentials.
+#### View Jobs for Specific Transfer
+```bash
+GET /db/jobs/{transferId}
+```
 
-If anything is unclear or you'd like me to expand specific integration examples (e.g., a working Coconut upload flow or a Dropbox uploader helper), tell me which piece to implement next.
+#### Remove Transfer (Allow Reprocessing)
+```bash
+DELETE /db/transfer/{transferId}
+```
+Deletes transfer from processed list, allows re-processing.
+
+#### Remove Specific Job
+```bash
+DELETE /db/job/{jobId}
+```
+
+#### Clear All Database
+```bash
+DELETE /db/clear
+```
+⚠️ Dangerous - clears all processed transfers and jobs
+
+### Environment Variables (.env)
+```
+FILEMAIL_API_KEY=your_filemail_key
+COCONUT_API_KEY=your_coconut_key
+FRAMEIO_TOKEN=your_frameio_token
+FRAMEIO_PROJECT_ID=your_project_id
+PORT=3000
+DEPLOYMENT_URL=https://postready-handling.fly.dev
+```
+
+### Processing Flow
+
+1. **Check Inbox**: `GET /inbox` → see pending Strawberries transfers
+2. **Preview**: `GET /preview/transfer/{id}` → review video files and count
+3. **Confirm**: `POST /process/transfer/{id}` → submit to Coconut
+4. **Wait**: Coconut transcodes and POSTs webhook when done
+5. **Auto-Upload**: Frame.io receives video from Wasabi via webhook
+6. **Verify**: `GET /db/jobs/{transferId}` → check job status
+
+### Key Features
+
+- ✅ **Portal Filtering**: Only processes "Strawberries" portal transfers
+- ✅ **Video-Only**: Skips non-video files (docs, images, etc.)
+- ✅ **Deduplication**: Prevents duplicate Coconut job submission per file
+- ✅ **Manual Approval**: No auto-processing, explicit `/process` endpoint required
+- ✅ **Database Tracking**: SQLite persists all transfers and job statuses
+- ✅ **Webhook Handling**: Auto-uploads to Frame.io on Coconut completion
+- ✅ **Local-Only**: Server bound to 127.0.0.1, not publicly accessible
+
+### File Extensions Supported
+`.mp4` `.mov` `.avi` `.mkv` `.flv` `.wmv` `.webm` `.m4v` `.3gp` `.ogv` `.ts` `.m2ts` `.mts` `.vob` `.rm` `.rmvb` `.divx` `.xvid` `.mxf`
+
+### Database Schema
+
+**processed_transfers**
+```
+id TEXT PRIMARY KEY
+created_at DATETIME
+status TEXT ('processing', 'completed', etc.)
+```
+
+**coconut_jobs**
+```
+id TEXT PRIMARY KEY
+transfer_id TEXT (foreign key)
+filename TEXT
+status TEXT ('pending', 'completed', 'failed')
+output_url TEXT (Wasabi MP4 URL)
+created_at DATETIME
+completed_at DATETIME
+error TEXT
+```
+
+### Code Patterns
+
+- **ES Modules**: `import`/`export` (no CommonJS)
+- **Async/Await**: All async operations use async/await
+- **Error Handling**: Functions throw on API errors, catch at endpoint level
+- **Logging**: Console.log for debugging, includes emoji prefixes for clarity
+- **Database**: Use `await db.get()`, `db.all()`, `db.run()` from `sqlite` package
+
+### Integration Details
+
+**Filemail API**
+- Endpoint: `https://api-public.filemail.com/transfer/{transferId}`
+- Header: `x-api-key: {key}`, `x-api-version: 2.0`
+- Returns: `{ data: { files: [...] } }`
+
+**Coconut API**
+- Endpoint: `https://api-us-west-2.coconut.co/v2/jobs`
+- Auth: Basic auth with `{apiKey}:`
+- Outputs: `{ output: { mp4: { url: "..." } } }`
+
+**Frame.io API**
+- Endpoint: `https://api.frame.io/v2/projects/{projectId}/assets`
+- Auth: Bearer token
+- Accepts: JSON with `{ name, source: { type: "url", url: "..." } }`
+
+**Wasabi S3**
+- Bucket: `strawberries`
+- Region: `eu-central-1`
+- Files uploaded by Coconut as: `/{filename}.mp4`
+
+### Extending the Code
+
+To add features:
+1. Add new Express route with `app.get()`, `app.post()`, etc.
+2. Update database schema in `initDb()` if needed
+3. Follow existing error handling pattern: try/catch, return 200 on errors when appropriate
+4. Add descriptive console.log with emoji prefix
+5. Commit and push to trigger GitHub Actions deployment
+
+### When to Ask for Help
+
+- Coconut API response format changes
+- Filemail portal names/custom field structure
+- Frame.io project configuration
+- Wasabi bucket credentials or region
+- Adding new external integrations
+
+
