@@ -14,6 +14,11 @@ let db;
 
 // Initialize database
 async function initDb() {
+  // TEMPORARILY DISABLED FOR TESTING
+  console.log("Database initialization disabled for testing");
+  return;
+  
+  /*
   db = await open({
     filename: "processed_transfers.db",
     driver: sqlite3.Database
@@ -39,21 +44,32 @@ async function initDb() {
       FOREIGN KEY(transfer_id) REFERENCES processed_transfers(id)
     );
   `);
+  */
 }
 
 /**
  * Check if a transfer has already been processed
  */
 async function isTransferProcessed(transferId) {
+  // TEMPORARILY DISABLED - always return false to process all transfers
+  return false;
+  
+  /*
   const row = await db.get("SELECT id FROM processed_transfers WHERE id = ?", [transferId]);
   return row !== undefined;
+  */
 }
 
 /**
  * Mark a transfer as processed
  */
 async function markTransferProcessed(transferId) {
+  // TEMPORARILY DISABLED
+  console.log("Marking transfer as processed (DB disabled):", transferId);
+  
+  /*
   await db.run("INSERT OR IGNORE INTO processed_transfers (id, status) VALUES (?, ?)", [transferId, "processing"]);
+  */
 }
 
 // Initialize database on startup
@@ -229,22 +245,32 @@ async function sendToCoconut(downloadUrl, filename) {
  * Store a new Coconut job in the database
  */
 async function storeCoconutJob(jobId, transferId, filename) {
+  // TEMPORARILY DISABLED
+  console.log("Job storage disabled (DB disabled):", jobId, transferId, filename);
+  
+  /*
   await db.run(
     "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
     [jobId, transferId, filename, "pending"]
   );
+  */
 }
 
 /**
  * Update Coconut job status
  */
 async function updateCoconutJob(jobId, status, outputUrl = null, error = null) {
+  // TEMPORARILY DISABLED
+  console.log("Job update disabled (DB disabled):", jobId, status, outputUrl, error);
+  
+  /*
   const completedAt = (status === "completed" || status === "failed") ? new Date().toISOString() : null;
   
   await db.run(
     "UPDATE coconut_jobs SET status = ?, output_url = ?, error = ?, completed_at = ? WHERE id = ?",
     [status, outputUrl, error, completedAt, jobId]
   );
+  */
 }
 
 /**
