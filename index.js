@@ -25,7 +25,19 @@ async function initDb() {
       id TEXT PRIMARY KEY,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       status TEXT DEFAULT 'processing'
-    )
+    );
+    
+    CREATE TABLE IF NOT EXISTS coconut_jobs (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT,
+      filename TEXT,
+      status TEXT DEFAULT 'pending',
+      output_url TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME,
+      error TEXT,
+      FOREIGN KEY(transfer_id) REFERENCES processed_transfers(id)
+    );
   `);
 }
 
@@ -48,11 +60,15 @@ async function markTransferProcessed(transferId) {
 await initDb();
 
 const app = express();
-app.listen(3000, () => console.log("Server running"));
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const DEPLOYMENT_URL = process.env.DEPLOYMENT_URL || "https://postready-handling.fly.dev";
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 const FILEMAIL_API_KEY = `t7ZthvU4aFpDbUmLPVrX4ICdvqtLeFAX2kH8MPno5a1qmskNNQvWD00740n9NwWK`
 const COCONUT_API_KEY = `k-6b91539067f3581606cfcf07f38a4eff`;
-const COCONUT_WEBHOOK_URL = `https://6585886dfff3.ngrok-free.app`;
+const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
 /**
  * Get all inbox transfers from Filemail
  */
@@ -134,6 +150,10 @@ async function processFilemailTransfer(transferId) {
     try {
       const result = await sendToCoconut(file.downloadurl, file.filename);
       console.log("Coconut job created:", result.id);
+      
+      // Store job in database
+      await storeCoconutJob(result.id, transferId, file.filename);
+      console.log("Job stored in database:", result.id);
     } catch (err) {
       console.error("Coconut error for file:", file.filename, err);
     }
@@ -188,3 +208,70 @@ async function sendToCoconut(downloadUrl, filename) {
 
   return await res.json();
 }
+
+/* ==================== COCONUT WEBHOOK ==================== */
+
+/**
+ * Store a new Coconut job in the database
+ */
+async function storeCoconutJob(jobId, transferId, filename) {
+  await db.run(
+    "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
+    [jobId, transferId, filename, "pending"]
+  );
+}
+
+/**
+ * Update Coconut job status
+ */
+async function updateCoconutJob(jobId, status, outputUrl = null, error = null) {
+  const completedAt = (status === "completed" || status === "failed") ? new Date().toISOString() : null;
+  
+  await db.run(
+    "UPDATE coconut_jobs SET status = ?, output_url = ?, error = ?, completed_at = ? WHERE id = ?",
+    [status, outputUrl, error, completedAt, jobId]
+  );
+}
+
+/**
+ * Webhook endpoint to handle Coconut job callbacks
+ */
+app.post("/webhooks/coconut", async (req, res) => {
+  try {
+    const { job } = req.body;
+
+    if (!job || !job.id) {
+      console.error("Invalid Coconut webhook payload:", req.body);
+      return res.status(400).json({ error: "Missing job id" });
+    }
+
+    console.log(`Coconut webhook received for job ${job.id}:`, job.status);
+
+    // Determine final status
+    let status = "processing";
+    let outputUrl = null;
+    let error = null;
+
+    if (job.status === "completed") {
+      status = "completed";
+      // Extract output URL from job outputs
+      if (job.output && job.output.mp4) {
+        outputUrl = job.output.mp4.url;
+      }
+    } else if (job.status === "failed" || job.status === "cancelled") {
+      status = "failed";
+      error = job.errors?.join(", ") || "Unknown error";
+    }
+
+    // Update job status in database
+    await updateCoconutJob(job.id, status, outputUrl, error);
+
+    console.log(`Job ${job.id} status updated to: ${status}`);
+    
+    // Return success
+    res.json({ success: true, jobId: job.id, status });
+  } catch (err) {
+    console.error("Webhook error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
