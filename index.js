@@ -95,11 +95,23 @@ const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || ""; // Set via env var
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || ""; // Set via env var
 const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
 
+// Debug: Log if API keys are loaded
+if (!FILEMAIL_API_KEY) {
+  console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set!");
+}
+if (!COCONUT_API_KEY) {
+  console.warn("⚠️  WARNING: COCONUT_API_KEY is not set!");
+}
+
 /**
  * Get all inbox transfers from Filemail
  */
 export async function getInboxTransfers() {
   const url = "https://api-public.filemail.com/transfer/inbox";
+
+  if (!FILEMAIL_API_KEY) {
+    throw new Error("FILEMAIL_API_KEY environment variable is not set. Please set it via: flyctl secrets set FILEMAIL_API_KEY=your_key");
+  }
 
   const res = await fetch(url, {
     method: "GET",
