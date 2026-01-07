@@ -1,5 +1,4 @@
 // node /Users/robmaas/Desktop/iMac/Projects/postready_handling/index
-
 import fetch from "node-fetch";
 import express from "express";
 import dotenv from "dotenv";
@@ -183,7 +182,7 @@ async function getFilemailFiles(transferId) {
  * Check if a file is a video file
  */
 function isVideoFile(filename) {
-  const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ogv', '.ts', '.m2ts', '.mts'];
+  const videoExtensions = ['.mp4', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.webm', '.m4v', '.3gp', '.ogv', '.ts', '.m2ts', '.mts', '.vob', '.rm', '.rmvb', '.divx', '.xvid', '.mxf'];
   const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
   return videoExtensions.includes(ext);
 }
@@ -318,32 +317,23 @@ async function uploadToFrameIO(videoUrl, filename) {
  * Store a new Coconut job in the database
  */
 async function storeCoconutJob(jobId, transferId, filename) {
-  // TEMPORARILY DISABLED
-  console.log("Job storage disabled (DB disabled):", jobId, transferId, filename);
-  
-  /*
   await db.run(
     "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
     [jobId, transferId, filename, "pending"]
   );
-  */
+}
 }
 
 /**
  * Update Coconut job status
  */
 async function updateCoconutJob(jobId, status, outputUrl = null, error = null) {
-  // TEMPORARILY DISABLED
-  console.log("Job update disabled (DB disabled):", jobId, status, outputUrl, error);
-  
-  /*
   const completedAt = (status === "completed" || status === "failed") ? new Date().toISOString() : null;
   
   await db.run(
     "UPDATE coconut_jobs SET status = ?, output_url = ?, error = ?, completed_at = ? WHERE id = ?",
     [status, outputUrl, error, completedAt, jobId]
   );
-  */
 }
 
 /**
