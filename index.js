@@ -89,9 +89,12 @@ app.get("/health", (req, res) => {
 const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // https://postready-handling.fly.dev/webhooks/coconut
 
-const FILEMAIL_API_KEY = `t7ZthvU4aFpDbUmLPVrX4ICdvqtLeFAX2kH8MPno5a1qmskNNQvWD00740n9NwWK`
-const COCONUT_API_KEY = `k-6b91539067f3581606cfcf07f38a4eff`;
+const FILEMAIL_API_KEY = process.env.FILEMAIL_API_KEY || "";
+const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
+const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || ""; // Set via env var
+const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || ""; // Set via env var
 const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
+
 /**
  * Get all inbox transfers from Filemail
  */
@@ -242,6 +245,54 @@ async function sendToCoconut(downloadUrl, filename) {
 /* ==================== COCONUT WEBHOOK ==================== */
 
 /**
+ * Upload a video to Frame.io
+ */
+async function uploadToFrameIO(videoUrl, filename) {
+  if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
+    console.warn("Frame.io credentials not configured, skipping upload");
+    return null;
+  }
+
+  try {
+    console.log(`Uploading to Frame.io: ${filename}`);
+    
+    // Frame.io API uses multipart form data for file uploads
+    // But since we have a remote URL, we can use their source_url parameter
+    const payload = {
+      name: filename,
+      source: {
+        type: "url",
+        url: videoUrl
+      }
+    };
+
+    const res = await fetch(
+      `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      }
+    );
+
+    if (!res.ok) {
+      const error = await res.text();
+      throw new Error(`Frame.io API error ${res.status}: ${error}`);
+    }
+
+    const data = await res.json();
+    console.log(`Video uploaded to Frame.io: ${data.id}`);
+    return data;
+  } catch (err) {
+    console.error("Frame.io upload error:", err);
+    return null;
+  }
+}
+
+/**
  * Store a new Coconut job in the database
  */
 async function storeCoconutJob(jobId, transferId, filename) {
@@ -308,7 +359,23 @@ app.post("/webhooks/coconut", async (req, res) => {
 
     console.log(`Job ${job.id} status updated to: ${status}`);
     
-    // Return success
+    // If completed, upload to Frame.io
+    if (status === "completed" && outputUrl) {
+      const filename = job.source?.url?.split("/").pop() || `${job.id}.mp4`;
+      console.log(`Uploading completed video to Frame.io: ${filename}`);
+      
+      uploadToFrameIO(outputUrl, filename)
+        .then((frameioResult) => {
+          if (frameioResult) {
+            console.log(`✅ Successfully uploaded to Frame.io: ${frameioResult.id}`);
+          }
+        })
+        .catch((err) => {
+          console.error(`❌ Frame.io upload failed:`, err);
+        });
+    }
+    
+    // Return success immediately (don't wait for Frame.io upload)
     res.json({ success: true, jobId: job.id, status });
   } catch (err) {
     console.error("Webhook error:", err);
