@@ -103,7 +103,7 @@ console.log(`   - FRAMEIO_TOKEN: ${FRAMEIO_TOKEN ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - FRAMEIO_PROJECT_ID: ${FRAMEIO_PROJECT_ID ? '✅ SET' : '❌ MISSING'}`);
 
 if (!FILEMAIL_API_KEY) {
-  console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set!");
+  console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set - make sure FLY_API_TOKEN is set in GitHub Secrets!");
 }
 if (!COCONUT_API_KEY) {
   console.warn("⚠️  WARNING: COCONUT_API_KEY is not set!");
