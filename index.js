@@ -37,7 +37,19 @@ async function initDb() {
       error TEXT,
       FOREIGN KEY(transfer_id) REFERENCES processed_transfers(id)
     );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
+
+  // Initialize default settings
+  await db.run(
+    "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+    ["cube_lut_url", CUBE_LUT_URL || ""]
+  );
 }
 
 /**
@@ -232,12 +244,26 @@ async function processFilemailTransfer(transferId) {
   console.log("Waiting for Coconut webhooks...");
 }
 
+/**
+ * Get current LUT URL (from database or environment fallback)
+ */
+async function getLutUrl() {
+  try {
+    const setting = await db.get("SELECT value FROM settings WHERE key = ?", ["cube_lut_url"]);
+    return setting?.value || CUBE_LUT_URL || "";
+  } catch (err) {
+    return CUBE_LUT_URL || "";
+  }
+}
+
 /* ==================== COCO ==================== */
 
 async function sendToCoconut(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
+  const lutUrl = await getLutUrl();
+  
   console.log("Sending to Coconut:", downloadUrl, safeFilename);
-  console.log(`${CUBE_LUT_URL ? '🎨 Applying cube LUT' : '⚪ No LUT applied'}`);\
+  console.log(`${lutUrl ? '🎨 Applying cube LUT' : '⚪ No LUT applied'}`);
   
   const payload = {
     input: { url: downloadUrl },
@@ -259,10 +285,10 @@ async function sendToCoconut(downloadUrl, filename) {
       mp4: {
         path: `/${safeFilename}.mp4`,
         // Apply cube LUT if provided
-        ...(CUBE_LUT_URL && {
+        ...(lutUrl && {
           effects: {
             lut: {
-              url: CUBE_LUT_URL
+              url: lutUrl
             }
           }
         })
@@ -641,6 +667,65 @@ app.delete("/db/clear", async (req, res) => {
       success: true, 
       message: "⚠️  All database entries cleared",
       warning: "This action cannot be undone"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/settings/lut - Get current cube LUT URL
+ */
+app.get("/db/settings/lut", async (req, res) => {
+  try {
+    const setting = await db.get("SELECT value, updated_at FROM settings WHERE key = ?", ["cube_lut_url"]);
+    res.json({
+      cube_lut_url: setting?.value || "",
+      updated_at: setting?.updated_at,
+      source: setting?.value ? "database" : "environment variable"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /db/settings/lut - Update cube LUT URL
+ */
+app.put("/db/settings/lut", async (req, res) => {
+  try {
+    const { cube_lut_url } = req.body;
+    
+    if (!cube_lut_url || typeof cube_lut_url !== "string") {
+      return res.status(400).json({ error: "cube_lut_url must be a non-empty string" });
+    }
+
+    await db.run(
+      "INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+      ["cube_lut_url", cube_lut_url]
+    );
+
+    res.json({
+      success: true,
+      message: "🎨 Cube LUT URL updated",
+      cube_lut_url,
+      note: "New LUT will be applied to videos processed after this update"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /db/settings/lut - Remove cube LUT (disable color grading)
+ */
+app.delete("/db/settings/lut", async (req, res) => {
+  try {
+    await db.run("DELETE FROM settings WHERE key = ?", ["cube_lut_url"]);
+    res.json({
+      success: true,
+      message: "🔄 Cube LUT removed - color grading disabled",
+      note: "Subsequent videos will be processed without LUT"
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

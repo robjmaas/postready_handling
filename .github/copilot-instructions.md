@@ -108,6 +108,25 @@ DELETE /db/clear
 ```
 ⚠️ Dangerous - clears all processed transfers and jobs
 
+#### Get Current Cube LUT URL
+```bash
+GET /db/settings/lut
+```
+Returns current LUT URL and whether it's from database or environment variable.
+
+#### Update Cube LUT URL
+```bash
+PUT /db/settings/lut
+```
+Body: `{ "cube_lut_url": "https://example.com/lut.cube" }`
+Updates the LUT URL without restarting the server.
+
+#### Remove Cube LUT (Disable Color Grading)
+```bash
+DELETE /db/settings/lut
+```
+Removes the LUT - subsequent videos will be processed without color grading.
+
 ### Environment Variables (.env)
 ```
 FILEMAIL_API_KEY=your_filemail_key
