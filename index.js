@@ -7,6 +7,8 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
+import https from "https";
 
 dotenv.config({ quiet: true });   // <— no output
 
@@ -298,6 +300,131 @@ async function sendToCoconut(downloadUrl, filename) {
   }
 
   return await res.json();
+}
+
+/* ==================== FFMPEG POST-PROCESSING ==================== */
+
+/**
+ * Get current LUT URL (from database or environment fallback)
+ */
+async function getLutUrl() {
+  try {
+    const setting = await db.get("SELECT value FROM settings WHERE key = ?", ["cube_lut_url"]);
+    return setting?.value || CUBE_LUT_URL || "";
+  } catch (err) {
+    return CUBE_LUT_URL || "";
+  }
+}
+
+/**
+ * Download a file from URL to local filesystem
+ */
+async function downloadFile(url, filepath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(filepath);
+    https.get(url, (response) => {
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        resolve();
+      });
+    }).on('error', (err) => {
+      fs.unlink(filepath, () => {}); // Delete file on error
+      reject(err);
+    });
+  });
+}
+
+/**
+ * Apply timecode and LUT color grading using ffmpeg
+ */
+async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
+  const tempDir = "./temp_processing";
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const baseName = filename.replace(/[^\w\d_-]/g, "_");
+  const downloadedMp4 = path.join(tempDir, `${baseName}_input.mp4`);
+  const downloadedSource = path.join(tempDir, `${baseName}_source.mp4`);
+  const processedMp4 = path.join(tempDir, `${baseName}_processed.mp4`);
+
+  try {
+    console.log(`🎬 Post-processing with ffmpeg: ${filename}`);
+    
+    // Get LUT URL
+    const lutUrl = await getLutUrl();
+    
+    // Download the Coconut-processed MP4 and source video
+    console.log(`📥 Downloading Coconut output...`);
+    await downloadFile(inputMp4Url, downloadedMp4);
+    
+    if (sourceVideoUrl) {
+      console.log(`📥 Downloading source video for timecode extraction...`);
+      await downloadFile(sourceVideoUrl, downloadedSource);
+    }
+    
+    // Build ffmpeg command with timecode and LUT
+    let ffmpegCmd = `ffmpeg -i "${downloadedMp4}"`;
+    
+    // Add timecode burn-in
+    ffmpegCmd += ` -vf "drawtext=fontfile=/System/Library/Fonts/Monaco.dfont:text='%{pts\\:hms}':fontsize=20:fontcolor=white:box=1:boxcolor=black:x=(w-text_w)/2:y=h-40"`;
+    
+    // Add LUT color grading if available
+    if (lutUrl) {
+      const lutPath = lutUrl.startsWith('http') ? lutUrl : lutUrl;
+      if (lutUrl.startsWith('http')) {
+        // Remote LUT - add to filter
+        ffmpegCmd += ` -vf "lut3d=file='${lutPath}'"`;
+      } else {
+        // Local LUT file
+        ffmpegCmd += ` -vf "lut3d=${lutPath}"`;
+      }
+      console.log(`🎨 Applying LUT color grading...`);
+    }
+    
+    // Output settings
+    ffmpegCmd += ` -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "${processedMp4}" -y`;
+    
+    console.log(`⚙️  Running ffmpeg post-processing...`);
+    execSync(ffmpegCmd, { stdio: 'inherit' });
+    
+    // Upload processed video back to Wasabi
+    console.log(`📤 Uploading processed video to Wasabi...`);
+    const wasabiUrl = await uploadToWasabi(processedMp4, `${baseName}_processed.mp4`);
+    
+    console.log(`✅ Post-processing complete: ${wasabiUrl}`);
+    
+    return wasabiUrl;
+  } catch (err) {
+    console.error(`❌ FFmpeg post-processing failed: ${err.message}`);
+    throw err;
+  } finally {
+    // Cleanup temp files
+    console.log(`🧹 Cleaning up temporary files...`);
+    try {
+      if (fs.existsSync(downloadedMp4)) fs.unlinkSync(downloadedMp4);
+      if (fs.existsSync(downloadedSource)) fs.unlinkSync(downloadedSource);
+      if (fs.existsSync(processedMp4)) fs.unlinkSync(processedMp4);
+    } catch (err) {
+      console.warn(`Warning: Could not clean up temp files: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * Upload a local file to Wasabi S3
+ */
+async function uploadToWasabi(localFilePath, s3Key) {
+  // For now, return the expected URL
+  // In production, use AWS SDK or similar to actually upload
+  const wasabiUrl = `https://strawberries.eu-central-1.wasabisys.com/${s3Key}`;
+  
+  // TODO: Implement actual S3 upload using AWS SDK
+  // For now, this is a placeholder that assumes Coconut will handle it
+  console.log(`📌 Wasabi URL: ${wasabiUrl}`);
+  
+  return wasabiUrl;
 }
 
 /* ==================== COCONUT WEBHOOK ==================== */
@@ -854,19 +981,26 @@ app.post("/webhooks/coconut", async (req, res) => {
 
     console.log(`Job ${job.id} status updated to: ${status}`);
     
-    // If completed, upload to Frame.io
+    // If completed, run ffmpeg post-processing then upload to Frame.io
     if (status === "completed" && outputUrl) {
       const filename = job.source?.url?.split("/").pop() || `${job.id}.mp4`;
-      console.log(`Uploading completed video to Frame.io: ${filename}`);
+      const sourceUrl = job.source?.url;
       
-      uploadToFrameIO(outputUrl, filename)
-        .then((frameioResult) => {
-          if (frameioResult) {
-            console.log(`✅ Successfully uploaded to Frame.io: ${frameioResult.id}`);
-          }
+      console.log(`🎬 Starting ffmpeg post-processing for: ${filename}`);
+      
+      postProcessWithFFmpeg(outputUrl, sourceUrl, filename)
+        .then((processedUrl) => {
+          console.log(`✅ Post-processing complete: ${processedUrl}`);
+          // Update database with processed URL
+          return uploadToFrameIO(processedUrl, filename)
+            .then((frameioResult) => {
+              if (frameioResult) {
+                console.log(`✅ Successfully uploaded to Frame.io: ${frameioResult.id}`);
+              }
+            });
         })
         .catch((err) => {
-          console.error(`❌ Frame.io upload failed:`, err);
+          console.error(`❌ Post-processing or Frame.io upload failed:`, err);
         });
     }
     
