@@ -26,7 +26,7 @@ const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
 const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || "";
 const CUBE_LUT_URL = process.env.CUBE_LUT_URL || "";
-const COCONUT_WEBHOOK_URL = `http://127.0.0.1:${PORT}/webhooks/coconut`;
+const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
 
 /* ==================== DATABASE SETUP ==================== */
 let db;
@@ -119,9 +119,14 @@ app.get("/webhooks/coconut", (req, res) => {
   });
 });
 
-const server = app.listen(PORT, "127.0.0.1", () => {
-  console.log(`Server running on http://127.0.0.1:${PORT}`);
-  console.log("⚠️  Local only - not accessible from remote connections");
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+  const isLocal = process.env.NODE_ENV !== "production";
+  if (isLocal) {
+    console.log("⚠️  Local mode - accessible from localhost only");
+  } else {
+    console.log(`🚀 Cloud deployment - accessible at ${DEPLOYMENT_URL}`);
+  }
 });
 
 // Debug: Log loaded API keys on startup
