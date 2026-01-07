@@ -64,7 +64,14 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const DEPLOYMENT_URL = process.env.DEPLOYMENT_URL || "https://postready-handling.fly.dev";
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Health check endpoint for deployment
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime() });
+});
+
+const server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// https://postready-handling.fly.dev/webhooks/coconut
 
 const FILEMAIL_API_KEY = `t7ZthvU4aFpDbUmLPVrX4ICdvqtLeFAX2kH8MPno5a1qmskNNQvWD00740n9NwWK`
 const COCONUT_API_KEY = `k-6b91539067f3581606cfcf07f38a4eff`;
@@ -93,28 +100,35 @@ export async function getInboxTransfers() {
   return data; // array of transfers
 }
 
-getInboxTransfers()
-  .then(async (transfers) => {
-    console.log(transfers.data.transfers)
-    const transfersall = transfers.data.transfers; // <-- the actual array
-    console.log("Transfers found:", transfersall.length);
-    // Process each transfer
-    for (const t of transfersall) {
-      console.log("Transfer ID:", t.id);
-      console.log("Portal:", t.customfields[0].value);
-      
-      // Check if already processed
-      if (await isTransferProcessed(t.id)) {
-        console.log("Transfer already processed, skipping:", t.id);
-        continue;
+// Start fetching transfers asynchronously after server is ready
+server.on("listening", () => {
+  console.log("Server is ready, starting transfer sync...");
+  
+  getInboxTransfers()
+    .then(async (transfers) => {
+      console.log(transfers.data.transfers)
+      const transfersall = transfers.data.transfers; // <-- the actual array
+      console.log("Transfers found:", transfersall.length);
+      // Process each transfer
+      for (const t of transfersall) {
+        console.log("Transfer ID:", t.id);
+        console.log("Portal:", t.customfields[0].value);
+        
+        // Check if already processed
+        if (await isTransferProcessed(t.id)) {
+          console.log("Transfer already processed, skipping:", t.id);
+          continue;
+        }
+        
+        // Mark as processing to avoid duplicates
+        await markTransferProcessed(t.id);
+        processFilemailTransfer(t.id);
       }
-      
-      // Mark as processing to avoid duplicates
-      await markTransferProcessed(t.id);
-      processFilemailTransfer(t.id);
-    }
-  })
-  .catch(console.error);
+    })
+    .catch(err => {
+      console.error("Error syncing transfers:", err);
+    });
+});
 
 /* ==================== 1. GET FILES FROM FILEMAIL ==================== */
 
