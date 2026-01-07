@@ -360,6 +360,51 @@ async function updateCoconutJob(jobId, status, outputUrl = null, error = null) {
 }
 
 /**
+ * Manual sync endpoint - upload completed jobs from Wasabi to Frame.io
+ */
+app.post("/sync/wasabi-frameio", async (req, res) => {
+  try {
+    console.log("Starting manual Wasabi to Frame.io sync...");
+    
+    // Get all completed coconut jobs that don't have a Frame.io upload marker
+    const jobs = await db.all(
+      "SELECT * FROM coconut_jobs WHERE status = ? AND output_url IS NOT NULL",
+      ["completed"]
+    );
+
+    if (!jobs || jobs.length === 0) {
+      return res.json({ message: "No completed jobs to sync", synced: 0 });
+    }
+
+    console.log(`Found ${jobs.length} completed jobs to sync`);
+    
+    let synced = 0;
+    for (const job of jobs) {
+      try {
+        console.log(`Uploading ${job.filename} from Wasabi to Frame.io...`);
+        const result = await uploadToFrameIO(job.output_url, job.filename);
+        if (result) {
+          synced++;
+          console.log(`✅ Synced: ${job.filename} (Frame.io ID: ${result.id})`);
+        }
+      } catch (err) {
+        console.error(`❌ Failed to sync ${job.filename}:`, err.message);
+      }
+    }
+
+    res.json({ 
+      message: `Synced ${synced} videos from Wasabi to Frame.io`,
+      total: jobs.length,
+      synced,
+      failed: jobs.length - synced
+    });
+  } catch (err) {
+    console.error("Sync error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * Webhook endpoint to handle Coconut job callbacks
  */
 app.post("/webhooks/coconut", async (req, res) => {
