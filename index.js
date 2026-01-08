@@ -1239,24 +1239,31 @@ app.post("/webhooks/coconut", async (req, res) => {
       postProcessWithFFmpeg(outputUrl, outputUrl, filename)
         .then((processedUrl) => {
           console.log(`✅ Post-processing complete: ${processedUrl}`);
-          // Upload to Frame.io after post-processing
-          return uploadToFrameIO(processedUrl, filename)
+          console.log(`📤 Video is ready in Wasabi: ${processedUrl}`);
+          
+          // Try to upload to Frame.io after post-processing
+          // This is non-blocking - video is already safely stored in Wasabi
+          uploadToFrameIO(processedUrl, filename)
             .then((frameioResult) => {
               if (frameioResult) {
-                console.log(`✅ Successfully uploaded to Frame.io: ${frameioResult.id}`);
+                console.log(`✅ Also uploaded to Frame.io: ${frameioResult.id}`);
               } else {
-                console.warn(`⚠️  Frame.io upload returned null (may have failed gracefully)`);
+                console.warn(`⚠️  Frame.io upload skipped or failed (video is safe in Wasabi)`);
               }
+            })
+            .catch((err) => {
+              console.error(`⚠️  Frame.io upload failed (non-blocking): ${err.message}`);
+              console.log(`   Video is safely stored in Wasabi - Frame.io is optional`);
             });
         })
         .catch((err) => {
-          console.error(`❌ Post-processing or Frame.io upload failed:`, err.message);
+          console.error(`❌ Post-processing failed:`, err.message);
         });
     } else if (status === "completed" && !outputUrl) {
       console.error(`❌ Job ${jobId} completed but no output URL found - cannot process`);
     }
     
-    // Return 200 success (don't wait for Frame.io upload)
+    // Return 200 success immediately
     res.status(200).json({ success: true, jobId, status });
   } catch (err) {
     console.error("Webhook error:", err);
