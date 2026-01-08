@@ -554,25 +554,45 @@ async function uploadToFrameIO(videoUrl, filename) {
     console.log(`   Video URL: ${videoUrl}`);
     console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
     
-    // Frame.io API v2 - upload to root asset (folder)
-    // The root asset ID is always the project root folder
-    // We'll use the URL-based upload which Frame.io accepts
+    // Step 1: Fetch the project details to get root asset ID
+    console.log(`   Step 1: Fetching project details...`);
+    const projectRes = await fetch(
+      `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}`,
+      {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    if (!projectRes.ok) {
+      throw new Error(`Failed to fetch project: ${projectRes.status}`);
+    }
+
+    const projectData = await projectRes.json();
+    const rootAssetId = projectData.root_asset_id;
     
+    if (!rootAssetId) {
+      console.error(`❌ Project doesn't have a root_asset_id`);
+      console.error(`   Project data:`, JSON.stringify(projectData, null, 2));
+      throw new Error("No root_asset_id found in project");
+    }
+
+    console.log(`   Root asset ID: ${rootAssetId}`);
+    
+    // Step 2: Upload to root folder using correct endpoint
+    console.log(`   Step 2: Uploading video to root folder...`);
     const payload = {
       name: filename,
       type: "file",
-      source: {
-        type: "url",
-        url: videoUrl
-      }
+      filetype: "video/mp4"
     };
 
-    console.log(`   Using endpoint: /v2/assets (root folder)`);
-    console.log(`   Payload:`, JSON.stringify(payload, null, 2));
-
-    // Try uploading to root folder via assets endpoint
-    const res = await fetch(
-      `https://api.frame.io/v2/assets`,
+    // Use URL-based upload (Frame.io will download and store)
+    const uploadRes = await fetch(
+      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
         method: "POST",
         headers: {
@@ -581,55 +601,26 @@ async function uploadToFrameIO(videoUrl, filename) {
         },
         body: JSON.stringify({
           ...payload,
-          parent_asset_id: null,  // Root folder
-          account_id: FRAMEIO_PROJECT_ID  // Project as account
+          source: {
+            type: "url",
+            url: videoUrl
+          }
         })
       }
     );
 
-    const responseText = await res.text();
+    const responseText = await uploadRes.text();
     
-    if (!res.ok) {
-      console.error(`❌ Frame.io API error ${res.status}`);
+    if (!uploadRes.ok) {
+      console.error(`❌ Frame.io API error ${uploadRes.status}`);
+      console.error(`   Endpoint: /v2/assets/${rootAssetId}/children`);
       console.error(`   Response: ${responseText}`);
       
-      // Handle specific error codes
-      if (res.status === 403) {
-        console.error(`   Forbidden: Token doesn't have permission to create assets`);
-        console.error(`   Solutions:`);
-        console.error(`   1. Check if token has 'assets:write' scope`);
-        console.error(`   2. Verify the project is shared with the token user`);
-        console.error(`   3. Generate a new personal access token with proper permissions`);
+      if (uploadRes.status === 403) {
+        console.error(`   Forbidden: Check token permissions`);
       }
       
-      // Try alternate endpoint
-      if (res.status === 404 || res.status === 400 || res.status === 403) {
-        console.log(`   Trying alternate endpoint with project_id...`);
-        const res2 = await fetch(
-          `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
-          {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(payload)
-          }
-        );
-        
-        const responseText2 = await res2.text();
-        if (!res2.ok) {
-          if (res2.status === 403) {
-            console.error(`❌ Also forbidden on /projects/{id}/assets endpoint`);
-          }
-          throw new Error(`Frame.io API error ${res2.status}: ${responseText2}`);
-        }
-        const data2 = JSON.parse(responseText2);
-        console.log(`✅ Video uploaded to Frame.io: ${data2.id}`);
-        return data2;
-      }
-      
-      throw new Error(`Frame.io API error ${res.status}: ${responseText}`);
+      throw new Error(`Frame.io API error ${uploadRes.status}: ${responseText}`);
     }
 
     const data = JSON.parse(responseText);
