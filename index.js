@@ -413,16 +413,11 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     }
     */
     
-    // Add timecode burn-in using drawtext filter
-    // Simplified: remove special characters that might cause parsing issues
-    filters.push(`drawtext=fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:text=%{pts\\:hms}:x=(w-text_w)/2:y=h-50`);
-    
-    // Build ffmpeg arguments array (avoids shell interpretation issues)
-    const filterChain = filters.join(',');
+    // Try simple re-encoding first WITHOUT filters to verify FFmpeg works
+    // Will add drawtext and LUT filters once basic encoding is confirmed working
     
     const ffmpegArgs = [
       '-i', downloadedMp4,
-      '-vf', filterChain,
       '-c:v', 'libx264',
       '-preset', 'fast',
       '-crf', '23',
@@ -432,8 +427,7 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       processedMp4
     ];
     
-    console.log(`⚙️  Running ffmpeg post-processing`);
-    console.log(`   Filters: ${filterChain}`);
+    console.log(`⚙️  Running ffmpeg basic re-encoding (no filters)`);
     console.log(`   Input: ${downloadedMp4}`);
     console.log(`   Output: ${processedMp4}`);
     console.log(`   Args:`, ffmpegArgs);
@@ -456,6 +450,9 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     }
     
     console.log(`✅ FFmpeg encoding complete`);
+    
+    // TODO: Add drawtext filter once basic encoding works
+    // TODO: Add LUT color grading filter
     
     // Upload processed video back to Wasabi
     console.log(`📤 Uploading processed video to Wasabi...`);
