@@ -470,22 +470,43 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     console.log(`   Output: ${processedMp4}`);
     console.log(`   Args:`, ffmpegArgs);
     
-    const result = spawnSync('ffmpeg', ffmpegArgs, {
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024  // 10MB buffer for output
-    });
+    // Use async spawn instead of spawnSync to avoid blocking the event loop
+    const { spawn } = await import('child_process');
     
-    if (result.status !== 0) {
-      const errorMsg = result.error ? result.error.message : `FFmpeg exited with status ${result.status}`;
-      console.error(`❌ FFmpeg failed: ${errorMsg}`);
-      if (result.stdout) {
-        console.error(`STDOUT:\n${result.stdout.slice(-2000)}`);  // Last 2000 chars
-      }
-      if (result.stderr) {
-        console.error(`STDERR:\n${result.stderr.slice(-2000)}`);  // Last 2000 chars
-      }
-      throw new Error(`FFmpeg processing failed: ${errorMsg}`);
-    }
+    await new Promise((resolve, reject) => {
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+      let stdoutData = '';
+      let stderrData = '';
+      
+      ffmpeg.stdout?.on('data', (data) => {
+        stdoutData += data.toString();
+      });
+      
+      ffmpeg.stderr?.on('data', (data) => {
+        stderrData += data.toString();
+      });
+      
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          const errorMsg = `FFmpeg exited with status ${code}`;
+          console.error(`❌ FFmpeg failed: ${errorMsg}`);
+          if (stdoutData) {
+            console.error(`STDOUT:\n${stdoutData.slice(-2000)}`);  // Last 2000 chars
+          }
+          if (stderrData) {
+            console.error(`STDERR:\n${stderrData.slice(-2000)}`);  // Last 2000 chars
+          }
+          reject(new Error(`FFmpeg processing failed: ${errorMsg}`));
+        } else {
+          resolve();
+        }
+      });
+      
+      ffmpeg.on('error', (err) => {
+        console.error(`❌ FFmpeg spawn error: ${err.message}`);
+        reject(err);
+      });
+    });
     
     console.log(`✅ FFmpeg encoding complete`);
     
