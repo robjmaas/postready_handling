@@ -593,8 +593,17 @@ async function uploadToFrameIO(videoUrl, filename) {
       console.error(`❌ Frame.io API error ${res.status}`);
       console.error(`   Response: ${responseText}`);
       
+      // Handle specific error codes
+      if (res.status === 403) {
+        console.error(`   Forbidden: Token doesn't have permission to create assets`);
+        console.error(`   Solutions:`);
+        console.error(`   1. Check if token has 'assets:write' scope`);
+        console.error(`   2. Verify the project is shared with the token user`);
+        console.error(`   3. Generate a new personal access token with proper permissions`);
+      }
+      
       // Try alternate endpoint
-      if (res.status === 404 || res.status === 400) {
+      if (res.status === 404 || res.status === 400 || res.status === 403) {
         console.log(`   Trying alternate endpoint with project_id...`);
         const res2 = await fetch(
           `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
@@ -610,6 +619,9 @@ async function uploadToFrameIO(videoUrl, filename) {
         
         const responseText2 = await res2.text();
         if (!res2.ok) {
+          if (res2.status === 403) {
+            console.error(`❌ Also forbidden on /projects/{id}/assets endpoint`);
+          }
           throw new Error(`Frame.io API error ${res2.status}: ${responseText2}`);
         }
         const data2 = JSON.parse(responseText2);
