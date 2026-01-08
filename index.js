@@ -630,7 +630,8 @@ async function uploadToFrameIO(videoUrl, filename) {
     
     // Extract filename from URL: https://s3.eu-central-1.wasabisys.com/strawberries/filename.mp4
     const urlPath = new URL(videoUrl).pathname;
-    const s3Key = urlPath.replace(/^\//, ''); // Remove leading /
+    // Path is /strawberries/filename.mp4, we need just filename.mp4 (without bucket name)
+    const s3Key = urlPath.split('/').slice(2).join('/'); // Skip first empty part and bucket name
     console.log(`   S3 Key: ${s3Key}`);
     
     // Read file from Wasabi S3 using SDK (authenticated)
