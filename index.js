@@ -402,20 +402,15 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     // Build filter chain (combine all filters into one -vf)
     const filters = [];
     
-    // Add LUT color grading FIRST if available (before timecode burn-in)
-    // NOTE: Temporarily disabled LUT to debug FFmpeg issues
-    /*
+    // Add LUT color grading if available
     if (localLutPath && fs.existsSync(localLutPath)) {
-      // Path in filter doesn't need quotes, just escape backslashes
+      // Path in filter - escape backslashes for FFmpeg
       const escapedLutPath = localLutPath.replace(/\\/g, '/');
       filters.push(`lut3d=${escapedLutPath}`);
       console.log(`🎨 Applying LUT color grading from: ${localLutPath}`);
     }
-    */
     
-    // Try simple re-encoding first WITHOUT filters to verify FFmpeg works
-    // Will add drawtext and LUT filters once basic encoding is confirmed working
-    
+    // Build FFmpeg arguments
     const ffmpegArgs = [
       '-i', downloadedMp4,
       '-c:v', 'libx264',
@@ -427,7 +422,15 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       processedMp4
     ];
     
-    console.log(`⚙️  Running ffmpeg basic re-encoding (no filters)`);
+    // Add filters if any exist
+    if (filters.length > 0) {
+      const filterChain = filters.join(',');
+      ffmpegArgs.splice(1, 0, '-vf', filterChain);  // Insert after -i
+      console.log(`⚙️  Running ffmpeg with filters: ${filterChain}`);
+    } else {
+      console.log(`⚙️  Running ffmpeg basic re-encoding (no filters)`);
+    }
+    
     console.log(`   Input: ${downloadedMp4}`);
     console.log(`   Output: ${processedMp4}`);
     console.log(`   Args:`, ffmpegArgs);
@@ -451,8 +454,7 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     console.log(`✅ FFmpeg encoding complete`);
     
-    // TODO: Add drawtext filter once basic encoding works
-    // TODO: Add LUT color grading filter
+    // TODO: Add drawtext (timecode) filter once LUT is tested
     
     // Upload processed video back to Wasabi
     console.log(`📤 Uploading processed video to Wasabi...`);
