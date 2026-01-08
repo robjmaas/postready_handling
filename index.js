@@ -256,7 +256,13 @@ async function processFilemailTransfer(transferId) {
     
     console.log("Creating Coconut job for:", file.filename);
     try {
-      const result = await sendToCoconut(file.downloadurl, file.filename);
+      // Download from Filemail and upload to Wasabi to get a stable public URL
+      console.log(`📥 Downloading from Filemail: ${file.filename}`);
+      const stagedUrl = await stageFileToWasabi(file.downloadurl, file.filename);
+      console.log(`✅ Staged to Wasabi: ${stagedUrl}`);
+      
+      // Now submit to Coconut with the stable Wasabi URL
+      const result = await sendToCoconut(stagedUrl, file.filename);
       console.log("Coconut job created:", result.id);
       
       // Store job in database
@@ -270,17 +276,58 @@ async function processFilemailTransfer(transferId) {
   console.log("Waiting for Coconut webhooks...");
 }
 
+/**
+ * Download file from Filemail and stage it to Wasabi for Coconut access
+ * Returns a public S3 URL that won't expire
+ */
+async function stageFileToWasabi(filemailUrl, filename) {
+  const tempDir = "/tmp/filemail_staging";
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+  
+  const tempFile = path.join(tempDir, filename);
+  
+  try {
+    // Download from Filemail
+    console.log(`   Downloading from Filemail...`);
+    await downloadFile(filemailUrl, tempFile);
+    
+    // Upload to Wasabi with staging prefix
+    const s3Key = `staging/${filename}`;
+    console.log(`   Uploading to Wasabi: ${s3Key}`);
+    
+    const fileContent = fs.readFileSync(tempFile);
+    const command = new PutObjectCommand({
+      Bucket: "strawberries",
+      Key: s3Key,
+      Body: fileContent,
+      ContentType: "video/mp4"
+    });
+    
+    await s3Client.send(command);
+    
+    const stagedUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${s3Key}`;
+    console.log(`   ✅ Staged URL: ${stagedUrl}`);
+    
+    return stagedUrl;
+  } finally {
+    // Clean up temp file
+    try {
+      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    } catch (err) {
+      console.warn(`Warning: Could not clean up ${tempFile}: ${err.message}`);
+    }
+  }
+}
+
 /* ==================== COCONUT ==================== */
 
 async function sendToCoconut(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
   
   console.log("Sending to Coconut:", downloadUrl, safeFilename);
-  console.log("⚠️  Known issue: Filemail URLs are temporary tokens that may expire.");
-  console.log("   If Coconut fails with 'input not accessible', try:");
-  console.log("   1. Verify the URL is still valid by testing it directly");
-  console.log("   2. Contact Filemail to request longer-lived download URLs");
-  console.log("   3. Consider downloading files through Filemail and re-uploading to accessible storage");
+  console.log("   ✅ Using staged Wasabi URL (no expiry issues)");
   
   const payload = {
     settings: {
