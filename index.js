@@ -656,10 +656,12 @@ async function uploadToFrameIO(videoUrl, filename) {
     const formData = new FormData();
     formData.append('file', bufferStream, { filename: filename });
     
-    const uploadRes = await fetch(
+    // Try PUT request first (uploading to the asset)
+    console.log(`   Trying PUT request to asset...`);
+    let uploadRes = await fetch(
       `https://api.frame.io/v2/assets/${assetData.id}`,
       {
-        method: "POST",
+        method: "PUT",
         headers: {
           "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
           ...formData.getHeaders()
@@ -668,6 +670,28 @@ async function uploadToFrameIO(videoUrl, filename) {
       }
     );
 
+    if (!uploadRes.ok && uploadRes.status === 404) {
+      // Try uploading as a child of the parent folder
+      console.log(`   PUT to asset returned 404, trying POST to parent folder...`);
+      
+      // Re-create the stream since the previous one was consumed
+      const bufferStream2 = Readable.from([videoBuffer]);
+      const formData2 = new FormData();
+      formData2.append('file', bufferStream2, { filename: filename });
+      
+      uploadRes = await fetch(
+        `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+            ...formData2.getHeaders()
+          },
+          body: formData2
+        }
+      );
+    }
+
     if (!uploadRes.ok) {
       console.error(`❌ Frame.io upload failed: ${uploadRes.status}`);
       const errText = await uploadRes.text();
@@ -675,8 +699,9 @@ async function uploadToFrameIO(videoUrl, filename) {
       throw new Error(`Upload to Frame.io failed: ${uploadRes.status}`);
     }
 
-    console.log(`✅ Video uploaded to Frame.io: ${assetData.id} (${videoBuffer.length} bytes)`);
-    return assetData;
+    const uploadResult = await uploadRes.json();
+    console.log(`✅ Video uploaded to Frame.io: ${uploadResult.id || assetData.id} (${videoBuffer.length} bytes)`);
+    return uploadResult;
   } catch (err) {
     console.error(`❌ Frame.io upload error:`, err.message);
     return null;
