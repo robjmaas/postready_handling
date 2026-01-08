@@ -403,16 +403,19 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     const filters = [];
     
     // Add LUT color grading FIRST if available (before timecode burn-in)
+    // NOTE: Temporarily disabled LUT to debug FFmpeg issues
+    /*
     if (localLutPath && fs.existsSync(localLutPath)) {
       // Path in filter doesn't need quotes, just escape backslashes
       const escapedLutPath = localLutPath.replace(/\\/g, '/');
       filters.push(`lut3d=${escapedLutPath}`);
       console.log(`🎨 Applying LUT color grading from: ${localLutPath}`);
     }
+    */
     
-    // Add timecode burn-in using FFmpeg's timecode filter
-    // This is simpler and more reliable than drawtext with dynamic values
-    filters.push(`drawtext=fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:text='%{pts\\:hms}':x=(w-text_w)/2:y=h-50`);
+    // Add timecode burn-in using drawtext filter
+    // No quotes around text value - ffmpeg will parse it correctly
+    filters.push(`drawtext=fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:text=%{pts\\:hms}:x=(w-text_w)/2:y=h-50`);
     
     // Build ffmpeg arguments array (avoids shell interpretation issues)
     const filterChain = filters.join(',');
@@ -433,6 +436,7 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     console.log(`   Filters: ${filterChain}`);
     console.log(`   Input: ${downloadedMp4}`);
     console.log(`   Output: ${processedMp4}`);
+    console.log(`   Command: ffmpeg ${ffmpegArgs.join(' ')}`);
     
     const result = spawnSync('ffmpeg', ffmpegArgs, {
       stdio: 'inherit',
