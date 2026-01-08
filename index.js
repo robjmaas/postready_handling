@@ -582,8 +582,61 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Generate a presigned URL that Frame.io can access
-    console.log(`   Step 2: Generating presigned URL for Frame.io access...`);
+    // Step 2: Find or create 'dailies' folder
+    console.log(`   Step 2: Looking for 'dailies' folder...`);
+    
+    let dailiesFolderId = null;
+    
+    // Fetch root folder's children to find 'dailies'
+    const childrenRes = await fetch(
+      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+      {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    if (childrenRes.ok) {
+      const children = await childrenRes.json();
+      const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
+      if (dailiesFolder) {
+        dailiesFolderId = dailiesFolder.id;
+        console.log(`   Found existing 'dailies' folder: ${dailiesFolderId}`);
+      }
+    }
+
+    // If 'dailies' folder doesn't exist, create it
+    if (!dailiesFolderId) {
+      console.log(`   'dailies' folder not found, creating...`);
+      const createFolderRes = await fetch(
+        `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            name: "dailies",
+            type: "folder"
+          })
+        }
+      );
+
+      if (createFolderRes.ok) {
+        const folderData = await createFolderRes.json();
+        dailiesFolderId = folderData.id;
+        console.log(`   Created 'dailies' folder: ${dailiesFolderId}`);
+      } else {
+        throw new Error(`Failed to create dailies folder: ${createFolderRes.status}`);
+      }
+    }
+
+    // Step 3: Generate a presigned URL that Frame.io can access
+    console.log(`   Step 3: Generating presigned URL for Frame.io access...`);
     
     // Extract filename from URL: https://s3.eu-central-1.wasabisys.com/strawberries/filename.mp4
     const urlPath = new URL(videoUrl).pathname;
@@ -603,12 +656,12 @@ async function uploadToFrameIO(videoUrl, filename) {
     const presignedUrl = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
     console.log(`   Presigned URL generated (valid for 1 hour)`);
     
-    // Step 3: Create asset with presigned URL as source
-    console.log(`   Step 3: Creating asset with presigned URL...`);
+    // Step 4: Create asset in 'dailies' folder with presigned URL as source
+    console.log(`   Step 4: Creating asset in 'dailies' folder...`);
     
     // Create asset with source pointing to presigned URL - Frame.io can access this
     const createRes = await fetch(
-      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+      `https://api.frame.io/v2/assets/${dailiesFolderId}/children`,
       {
         method: "POST",
         headers: {
