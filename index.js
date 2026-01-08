@@ -278,6 +278,9 @@ async function sendToCoconut(downloadUrl, filename) {
   console.log("Sending to Coconut:", downloadUrl, safeFilename);
   
   const payload = {
+    settings: {
+      ultrafast: true
+    },
     input: { url: downloadUrl },
     storage: {
       service: "wasabi",
@@ -688,6 +691,60 @@ app.post("/process/transfer/:transferId", async (req, res) => {
   } catch (err) {
     console.error("Process error:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Test Frame.io connection and credentials
+ */
+app.get("/test/frameio", async (req, res) => {
+  if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
+    return res.json({
+      success: false,
+      error: "Frame.io credentials not configured",
+      FRAMEIO_TOKEN: FRAMEIO_TOKEN ? "SET" : "MISSING",
+      FRAMEIO_PROJECT_ID: FRAMEIO_PROJECT_ID ? "SET" : "MISSING"
+    });
+  }
+
+  try {
+    console.log(`🧪 Testing Frame.io connection...`);
+    console.log(`   Token: ${FRAMEIO_TOKEN.substring(0, 20)}...`);
+    console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
+
+    // Test 1: Get project info
+    const projectRes = await fetch(
+      `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}`,
+      {
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`
+        }
+      }
+    );
+
+    const projectData = await projectRes.text();
+
+    return res.json({
+      success: projectRes.ok,
+      status: projectRes.status,
+      projectEndpoint: `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}`,
+      projectResponse: {
+        status: projectRes.status,
+        ok: projectRes.ok,
+        data: projectRes.ok ? JSON.parse(projectData) : projectData
+      },
+      assetEndpoint: `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
+      troubleshooting: {
+        "404 on project": "Check if project ID is correct",
+        "403 on project": "Token may not have permission to access this project",
+        "200 on project but 404 on assets": "Try different endpoint or check if assets endpoint exists"
+      }
+    });
+  } catch (err) {
+    res.json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
