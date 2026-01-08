@@ -582,16 +582,21 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Upload to root folder using correct endpoint
-    console.log(`   Step 2: Uploading video to root folder...`);
-    const payload = {
-      name: filename,
-      type: "file",
-      filetype: "video/mp4"
-    };
-
-    // Use URL-based upload (Frame.io will download and store)
-    const uploadRes = await fetch(
+    // Step 2: Verify the video URL is accessible
+    console.log(`   Step 2: Verifying video URL accessibility...`);
+    try {
+      const urlCheck = await fetch(videoUrl, { method: "HEAD" });
+      console.log(`   URL status: ${urlCheck.status}`);
+      console.log(`   Content-Length: ${urlCheck.headers.get("content-length")} bytes`);
+    } catch (err) {
+      console.warn(`   ⚠️  Could not verify URL: ${err.message}`);
+    }
+    
+    // Step 3: Create asset with realtime upload (better than URL-based source)
+    console.log(`   Step 3: Creating asset with realtime upload mode...`);
+    
+    // First, create the asset with is_realtime_upload: true
+    const createRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
         method: "POST",
@@ -600,32 +605,65 @@ async function uploadToFrameIO(videoUrl, filename) {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          ...payload,
-          source: {
-            type: "url",
-            url: videoUrl
-          }
+          name: filename,
+          type: "file",
+          filetype: "video/mp4",
+          is_realtime_upload: true
         })
       }
     );
 
-    const responseText = await uploadRes.text();
+    const createResponseText = await createRes.text();
     
-    if (!uploadRes.ok) {
-      console.error(`❌ Frame.io API error ${uploadRes.status}`);
+    if (!createRes.ok) {
+      console.error(`❌ Frame.io API error ${createRes.status}`);
       console.error(`   Endpoint: /v2/assets/${rootAssetId}/children`);
-      console.error(`   Response: ${responseText}`);
-      
-      if (uploadRes.status === 403) {
-        console.error(`   Forbidden: Check token permissions`);
-      }
-      
-      throw new Error(`Frame.io API error ${uploadRes.status}: ${responseText}`);
+      console.error(`   Response: ${createResponseText}`);
+      throw new Error(`Frame.io API error ${createRes.status}: ${createResponseText}`);
     }
 
-    const data = JSON.parse(responseText);
-    console.log(`✅ Video uploaded to Frame.io: ${data.id}`);
-    return data;
+    const assetData = JSON.parse(createResponseText);
+    console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
+    
+    // Step 4: Download video from Wasabi and upload to Frame.io
+    console.log(`   Step 4: Downloading video from Wasabi and uploading to Frame.io...`);
+    const videoRes = await fetch(videoUrl);
+    
+    if (!videoRes.ok) {
+      console.error(`❌ Failed to download video from Wasabi: ${videoRes.status}`);
+      console.error(`   URL: ${videoUrl}`);
+      throw new Error(`Failed to fetch video: ${videoRes.status}`);
+    }
+
+    const videoBuffer = await videoRes.buffer();
+    console.log(`   Downloaded ${videoBuffer.length} bytes from Wasabi`);
+
+    // Get upload URL from asset
+    if (!assetData.upload_url) {
+      console.error(`❌ No upload_url in asset response`);
+      throw new Error("No upload_url provided by Frame.io");
+    }
+
+    console.log(`   Uploading ${videoBuffer.length} bytes to Frame.io...`);
+    
+    // Upload video data directly to the upload URL
+    const uploadRes = await fetch(assetData.upload_url, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "video/mp4",
+        "Content-Length": videoBuffer.length.toString()
+      },
+      body: videoBuffer
+    });
+
+    if (!uploadRes.ok) {
+      console.error(`❌ Frame.io upload failed: ${uploadRes.status}`);
+      console.error(`   Response: ${await uploadRes.text()}`);
+      throw new Error(`Upload to Frame.io failed: ${uploadRes.status}`);
+    }
+
+    console.log(`✅ Video uploaded to Frame.io: ${assetData.id} (${videoBuffer.length} bytes)`);
+    return assetData;
   } catch (err) {
     console.error(`❌ Frame.io upload error:`, err.message);
     return null;
