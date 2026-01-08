@@ -592,10 +592,10 @@ async function uploadToFrameIO(videoUrl, filename) {
       console.warn(`   ⚠️  Could not verify URL: ${err.message}`);
     }
     
-    // Step 3: Create asset with realtime upload (better than URL-based source)
-    console.log(`   Step 3: Creating asset with realtime upload mode...`);
+    // Step 3: Create asset WITHOUT realtime mode first
+    console.log(`   Step 3: Creating asset...`);
     
-    // First, create the asset with is_realtime_upload: true
+    // Create the asset (simple mode)
     const createRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
@@ -607,8 +607,7 @@ async function uploadToFrameIO(videoUrl, filename) {
         body: JSON.stringify({
           name: filename,
           type: "file",
-          filetype: "video/mp4",
-          is_realtime_upload: true
+          filetype: "video/mp4"
         })
       }
     );
@@ -624,7 +623,6 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
-    console.log(`   Asset response keys:`, Object.keys(assetData).join(', '));
     
     // Step 4: Reading video from Wasabi using S3 SDK (for authenticated access)
     console.log(`   Step 4: Reading video from Wasabi...`);
@@ -646,80 +644,48 @@ async function uploadToFrameIO(videoUrl, filename) {
     const videoBuffer = await s3Response.Body.transformToByteArray();
     console.log(`   Read ${videoBuffer.length} bytes from Wasabi`);
 
-    // Step 5: Get upload URL for realtime upload
-    console.log(`   Step 5: Requesting upload URL...`);
+    // Step 5: Upload video to Frame.io using multipart form data
+    console.log(`   Step 5: Uploading ${videoBuffer.length} bytes to Frame.io...`);
     
-    let uploadUrl = assetData.upload_url;
+    // Try uploading directly to the asset endpoint with multipart form data
+    const FormData = (await import('form-data')).default;
+    const formData = new FormData();
+    formData.append('file', videoBuffer, filename);
     
-    if (!uploadUrl) {
-      // For realtime uploads, try fetching the asset to get upload_url
-      console.log(`   No upload_url in creation response, fetching asset details...`);
-      
-      const assetCheckRes = await fetch(
-        `https://api.frame.io/v2/assets/${assetData.id}`,
-        {
-          method: "GET",
-          headers: {
-            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-            "Content-Type": "application/json"
-          }
-        }
-      );
-
-      if (assetCheckRes.ok) {
-        const assetDetails = await assetCheckRes.json();
-        uploadUrl = assetDetails.upload_url;
-        console.log(`   Asset details keys:`, Object.keys(assetDetails).join(', '));
+    const uploadRes = await fetch(
+      `https://api.frame.io/v2/assets/${assetData.id}`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          ...formData.getHeaders()
+        },
+        body: formData
       }
-    }
-    
-    // If still no upload URL, try creating an upload session
-    if (!uploadUrl) {
-      console.log(`   Still no upload_url, trying to create upload session...`);
+    );
+
+    if (!uploadRes.ok) {
+      console.error(`❌ Frame.io upload failed: ${uploadRes.status}`);
+      const errText = await uploadRes.text();
+      console.error(`   Response: ${errText}`);
       
-      const uploadSessionRes = await fetch(
-        `https://api.frame.io/v2/assets/${assetData.id}/upload_sessions`,
+      // Try alternate endpoint
+      console.log(`   Trying alternate upload endpoint...`);
+      const uploadRes2 = await fetch(
+        `https://api.frame.io/v2/assets/${rootAssetId}/children/${assetData.id}`,
         {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-            "Content-Type": "application/json"
+            "Content-Type": "video/mp4"
           },
-          body: JSON.stringify({
-            filesize: videoBuffer.length
-          })
+          body: videoBuffer
         }
       );
-
-      if (uploadSessionRes.ok) {
-        const uploadSession = await uploadSessionRes.json();
-        uploadUrl = uploadSession.upload_url;
-        console.log(`   Upload session created:`, Object.keys(uploadSession).join(', '));
-      } else {
-        const sessionErr = await uploadSessionRes.text();
-        console.log(`   Upload session creation failed: ${uploadSessionRes.status} - ${sessionErr}`);
+      
+      if (!uploadRes2.ok) {
+        throw new Error(`Upload to Frame.io failed: ${uploadRes2.status}`);
       }
-    }
-    
-    // Final check
-    if (!uploadUrl) {
-      throw new Error("Could not obtain upload URL from Frame.io (no upload_url in asset or upload_sessions response)");
-    }
-
-    console.log(`   Step 6: Uploading ${videoBuffer.length} bytes to Frame.io...`);
-    const uploadRes = await fetch(uploadUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "video/mp4",
-        "Content-Length": videoBuffer.length.toString()
-      },
-      body: videoBuffer
-    });
-
-    if (!uploadRes.ok) {
-      console.error(`❌ Frame.io upload failed: ${uploadRes.status}`);
-      console.error(`   Response: ${await uploadRes.text()}`);
-      throw new Error(`Upload to Frame.io failed: ${uploadRes.status}`);
     }
 
     console.log(`✅ Video uploaded to Frame.io: ${assetData.id} (${videoBuffer.length} bytes)`);
