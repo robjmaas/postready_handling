@@ -222,54 +222,6 @@ function isVideoFile(filename) {
   return videoExtensions.includes(ext);
 }
 
-/**
- * Check if a file is an audio file
- */
-function isAudioFile(filename) {
-  const audioExtensions = ['.wav', '.aiff', '.aif', '.aac', '.mp3', '.flac', '.m4a', '.wma', '.opus'];
-  const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
-  return audioExtensions.includes(ext);
-}
-
-/**
- * Extract timecode from audio file (BWF format) using FFprobe
- */
-async function extractAudioTimecode(downloadUrl) {
-  try {
-    const https = require('https');
-    const { createWriteStream, unlinkSync } = require('fs');
-    
-    // Download audio file temporarily
-    const tempAudioPath = `/tmp/audio_${Date.now()}.wav`;
-    
-    await new Promise((resolve, reject) => {
-      const file = createWriteStream(tempAudioPath);
-      https.get(downloadUrl, (res) => {
-        res.pipe(file)
-          .on('finish', () => file.close(resolve))
-          .on('error', reject);
-      }).on('error', reject);
-    });
-    
-    // Extract timecode using FFprobe
-    const { execSync } = require('child_process');
-    try {
-      const output = execSync(`ffprobe -v error -show_entries format_tags=timecode,time_code -of default=noprint_wrappers=1:nokey=1:noesc=1 "${tempAudioPath}" 2>/dev/null || echo ""`, {
-        encoding: 'utf8'
-      }).trim();
-      
-      unlinkSync(tempAudioPath);
-      return output || null;
-    } catch (e) {
-      unlinkSync(tempAudioPath);
-      return null;
-    }
-  } catch (err) {
-    console.error("Error extracting audio timecode:", err.message);
-    return null;
-  }
-}
-
 async function processFilemailTransfer(transferId) {
   console.log("Processing Filemail transfer:", transferId);
   console.log("Fetching Filemail files...");
@@ -721,142 +673,24 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
     
     const files = await getFilemailFiles(transferId);
     const videoFiles = files.filter(f => isVideoFile(f.filename));
-    const audioFiles = files.filter(f => isAudioFile(f.filename));
-    const otherFiles = files.filter(f => !isVideoFile(f.filename) && !isAudioFile(f.filename));
-    
-    // Extract timecodes for audio files if available
-    const audioWithTimecodes = await Promise.all(audioFiles.map(async (f) => ({
-      filename: f.filename,
-      downloadurl: f.downloadurl,
-      size: f.filesize,
-      timecode: await extractAudioTimecode(f.downloadurl)
-    })));
+    const nonVideoFiles = files.filter(f => !isVideoFile(f.filename));
     
     res.json({
       transferId,
       summary: {
         totalFiles: files.length,
         videoFiles: videoFiles.length,
-        audioFiles: audioFiles.length,
-        otherFiles: otherFiles.length
+        nonVideoFiles: nonVideoFiles.length
       },
       videos: videoFiles.map(f => ({
         filename: f.filename,
         downloadurl: f.downloadurl,
         size: f.filesize
       })),
-      audio: audioWithTimecodes,
-      skipped: otherFiles.map(f => f.filename)
+      skipped: nonVideoFiles.map(f => f.filename)
     });
   } catch (err) {
     console.error("Preview error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * Audio sync endpoint - merge audio with timecode to matching video
- * POST /sync/audio/{videoFilename}?audioFilename=audio.wav
- */
-app.post("/sync/audio/:videoFilename", async (req, res) => {
-  try {
-    const { videoFilename } = req.params;
-    const { audioFilename, videoUrl, audioUrl } = req.body;
-    
-    if (!audioUrl || !videoUrl) {
-      return res.status(400).json({ error: "Missing videoUrl or audioUrl in request body" });
-    }
-    
-    console.log(`🔗 Starting audio sync: ${videoFilename}`);
-    console.log(`   Video: ${videoUrl}`);
-    console.log(`   Audio: ${audioUrl}`);
-    
-    // Extract timecode from audio
-    const audioTimecode = await extractAudioTimecode(audioUrl);
-    console.log(`   Audio timecode: ${audioTimecode || "Not found (will use 00:00:00:00)"}`);
-    
-    // Download both files temporarily
-    const https = require('https');
-    const { createWriteStream, unlinkSync } = require('fs');
-    
-    const tempVideoPath = `/tmp/video_${Date.now()}.mp4`;
-    const tempAudioPath = `/tmp/audio_${Date.now()}.wav`;
-    const tempOutputPath = `/tmp/synced_${Date.now()}.mp4`;
-    
-    // Download video
-    await new Promise((resolve, reject) => {
-      const file = createWriteStream(tempVideoPath);
-      https.get(videoUrl, (res) => {
-        res.pipe(file)
-          .on('finish', () => file.close(resolve))
-          .on('error', reject);
-      }).on('error', reject);
-    });
-    
-    // Download audio
-    await new Promise((resolve, reject) => {
-      const file = createWriteStream(tempAudioPath);
-      https.get(audioUrl, (res) => {
-        res.pipe(file)
-          .on('finish', () => file.close(resolve))
-          .on('error', reject);
-      }).on('error', reject);
-    });
-    
-    // Merge audio with video using FFmpeg
-    const { spawnSync } = require('child_process');
-    
-    const ffmpegArgs = [
-      '-i', tempVideoPath,
-      '-i', tempAudioPath,
-      '-c:v', 'copy',           // Copy video codec (no re-encoding)
-      '-c:a', 'aac',            // AAC audio codec
-      '-b:a', '128k',           // Audio bitrate
-      '-shortest',              // Use shortest stream length
-      '-y',                      // Overwrite output
-      tempOutputPath
-    ];
-    
-    console.log(`🎬 Running FFmpeg audio merge...`);
-    const result = spawnSync('ffmpeg', ffmpegArgs, { encoding: 'utf8' });
-    
-    if (result.error || result.status !== 0) {
-      unlinkSync(tempVideoPath);
-      unlinkSync(tempAudioPath);
-      console.error(`❌ FFmpeg error: ${result.stderr}`);
-      return res.status(500).json({ error: "FFmpeg merge failed", details: result.stderr });
-    }
-    
-    // Upload merged file to Wasabi
-    const { readFileSync } = require('fs');
-    const mergedBuffer = readFileSync(tempOutputPath);
-    const mergedFilename = `${videoFilename.replace(/\.[^.]+$/, '')}_with_audio.mp4`;
-    
-    const s3Params = {
-      Bucket: 'strawberries',
-      Key: mergedFilename,
-      Body: mergedBuffer,
-      ContentType: 'video/mp4'
-    };
-    
-    await s3Client.send(new PutObjectCommand(s3Params));
-    const wasabiUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${mergedFilename}`;
-    
-    console.log(`✅ Audio synced and uploaded to Wasabi: ${wasabiUrl}`);
-    
-    // Cleanup
-    unlinkSync(tempVideoPath);
-    unlinkSync(tempAudioPath);
-    unlinkSync(tempOutputPath);
-    
-    res.json({
-      success: true,
-      mergedFile: mergedFilename,
-      wasabiUrl,
-      videoTimecode: audioTimecode || "00:00:00:00"
-    });
-  } catch (err) {
-    console.error("Audio sync error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1013,6 +847,8 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
     console.error("Preview error:", err);
     res.status(500).json({ error: err.message });
   }
+});
+
 /**
  * Manual sync endpoint - upload completed jobs from Wasabi to Frame.io
  */
