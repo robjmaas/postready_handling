@@ -456,10 +456,12 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     }
     
     // Add rest of encoding options
+    // Use memory-efficient settings to prevent OOM on constrained systems
     ffmpegArgs.push(
       '-c:v', 'libx264',
-      '-preset', 'fast',
-      '-crf', '23',
+      '-preset', 'ultrafast',  // Faster encoding uses less memory
+      '-crf', '28',             // Slightly lower quality for faster processing and less memory
+      '-bufsize', '5000k',      // Limit buffer size to reduce memory usage
       '-c:a', 'aac',
       '-b:a', '128k',
       '-y',
