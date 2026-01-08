@@ -295,6 +295,7 @@ async function sendToCoconut(downloadUrl, filename) {
     },
     outputs: {
       mp4: {
+        key: "mp4:1080p",
         path: `/${safeFilename}.mp4`
       }
     }
