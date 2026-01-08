@@ -7,7 +7,7 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import https from "https";
 import http from "http";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
@@ -404,19 +404,47 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     // Add LUT color grading FIRST if available (before timecode burn-in)
     if (localLutPath && fs.existsSync(localLutPath)) {
-      filters.push(`lut3d='${localLutPath}'`);
-      console.log(`🎨 Applying LUT color grading...`);
+      // Path in filter doesn't need quotes, just escape backslashes
+      const escapedLutPath = localLutPath.replace(/\\/g, '/');
+      filters.push(`lut3d=${escapedLutPath}`);
+      console.log(`🎨 Applying LUT color grading from: ${localLutPath}`);
     }
     
-    // Add timecode burn-in (use default font on Linux)
-    filters.push(`drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:x=(w-text_w)/2:y=h-50`);
+    // Add timecode burn-in using FFmpeg's timecode filter
+    // This is simpler and more reliable than drawtext with dynamic values
+    filters.push(`drawtext=fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:text='%{pts\\:hms}':x=(w-text_w)/2:y=h-50`);
     
-    // Build ffmpeg command
+    // Build ffmpeg arguments array (avoids shell interpretation issues)
     const filterChain = filters.join(',');
-    const ffmpegCmd = `ffmpeg -i "${downloadedMp4}" -vf "${filterChain}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "${processedMp4}" -y`;
     
-    console.log(`⚙️  Running ffmpeg post-processing...`);
-    execSync(ffmpegCmd, { stdio: 'inherit' });
+    const ffmpegArgs = [
+      '-i', downloadedMp4,
+      '-vf', filterChain,
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-crf', '23',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-y',
+      processedMp4
+    ];
+    
+    console.log(`⚙️  Running ffmpeg post-processing`);
+    console.log(`   Filters: ${filterChain}`);
+    console.log(`   Input: ${downloadedMp4}`);
+    console.log(`   Output: ${processedMp4}`);
+    
+    const result = spawnSync('ffmpeg', ffmpegArgs, {
+      stdio: 'inherit',
+      encoding: 'utf-8'
+    });
+    
+    if (result.status !== 0) {
+      const errorMsg = result.error ? result.error.message : `FFmpeg exited with status ${result.status}`;
+      console.error(`❌ FFmpeg failed: ${errorMsg}`);
+      if (result.stderr) console.error(`stderr: ${result.stderr}`);
+      throw new Error(`FFmpeg processing failed: ${errorMsg}`);
+    }
     
     // Upload processed video back to Wasabi
     console.log(`📤 Uploading processed video to Wasabi...`);
