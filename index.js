@@ -276,6 +276,11 @@ async function sendToCoconut(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
   
   console.log("Sending to Coconut:", downloadUrl, safeFilename);
+  console.log("⚠️  Known issue: Filemail URLs are temporary tokens that may expire.");
+  console.log("   If Coconut fails with 'input not accessible', try:");
+  console.log("   1. Verify the URL is still valid by testing it directly");
+  console.log("   2. Contact Filemail to request longer-lived download URLs");
+  console.log("   3. Consider downloading files through Filemail and re-uploading to accessible storage");
   
   const payload = {
     settings: {
