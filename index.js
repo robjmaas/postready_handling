@@ -647,10 +647,14 @@ async function uploadToFrameIO(videoUrl, filename) {
     // Step 5: Upload video to Frame.io using multipart form data
     console.log(`   Step 5: Uploading ${videoBuffer.length} bytes to Frame.io...`);
     
+    // Create a readable stream from the buffer
+    const { Readable } = await import('stream');
+    const bufferStream = Readable.from(videoBuffer);
+    
     // Try uploading directly to the asset endpoint with multipart form data
     const FormData = (await import('form-data')).default;
     const formData = new FormData();
-    formData.append('file', videoBuffer, filename);
+    formData.append('file', bufferStream, filename);
     
     const uploadRes = await fetch(
       `https://api.frame.io/v2/assets/${assetData.id}`,
@@ -668,24 +672,7 @@ async function uploadToFrameIO(videoUrl, filename) {
       console.error(`❌ Frame.io upload failed: ${uploadRes.status}`);
       const errText = await uploadRes.text();
       console.error(`   Response: ${errText}`);
-      
-      // Try alternate endpoint
-      console.log(`   Trying alternate upload endpoint...`);
-      const uploadRes2 = await fetch(
-        `https://api.frame.io/v2/assets/${rootAssetId}/children/${assetData.id}`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-            "Content-Type": "video/mp4"
-          },
-          body: videoBuffer
-        }
-      );
-      
-      if (!uploadRes2.ok) {
-        throw new Error(`Upload to Frame.io failed: ${uploadRes2.status}`);
-      }
+      throw new Error(`Upload to Frame.io failed: ${uploadRes.status}`);
     }
 
     console.log(`✅ Video uploaded to Frame.io: ${assetData.id} (${videoBuffer.length} bytes)`);
