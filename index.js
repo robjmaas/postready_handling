@@ -649,12 +649,12 @@ async function uploadToFrameIO(videoUrl, filename) {
     
     // Create a readable stream from the buffer
     const { Readable } = await import('stream');
-    const bufferStream = Readable.from(videoBuffer);
+    const bufferStream = Readable.from([videoBuffer]);
     
     // Try uploading directly to the asset endpoint with multipart form data
     const FormData = (await import('form-data')).default;
     const formData = new FormData();
-    formData.append('file', bufferStream, filename);
+    formData.append('file', bufferStream, { filename: filename });
     
     const uploadRes = await fetch(
       `https://api.frame.io/v2/assets/${assetData.id}`,
