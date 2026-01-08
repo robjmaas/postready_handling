@@ -625,18 +625,24 @@ async function uploadToFrameIO(videoUrl, filename) {
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
     
-    // Step 4: Download video from Wasabi and upload to Frame.io
-    console.log(`   Step 4: Downloading video from Wasabi and uploading to Frame.io...`);
-    const videoRes = await fetch(videoUrl);
+    // Step 4: Download video from Wasabi using S3 SDK (for authenticated access)
+    console.log(`   Step 4: Reading video from Wasabi and uploading to Frame.io...`);
     
-    if (!videoRes.ok) {
-      console.error(`❌ Failed to download video from Wasabi: ${videoRes.status}`);
-      console.error(`   URL: ${videoUrl}`);
-      throw new Error(`Failed to fetch video: ${videoRes.status}`);
-    }
-
-    const videoBuffer = await videoRes.buffer();
-    console.log(`   Downloaded ${videoBuffer.length} bytes from Wasabi`);
+    // Extract filename from URL: https://s3.eu-central-1.wasabisys.com/strawberries/filename.mp4
+    const urlPath = new URL(videoUrl).pathname;
+    const s3Key = urlPath.replace(/^\//, ''); // Remove leading /
+    console.log(`   S3 Key: ${s3Key}`);
+    
+    // Read file from Wasabi S3 using SDK (authenticated)
+    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+    const getCommand = new GetObjectCommand({
+      Bucket: "strawberries",
+      Key: s3Key
+    });
+    
+    const s3Response = await s3Client.send(getCommand);
+    const videoBuffer = await s3Response.Body.transformToByteArray();
+    console.log(`   Read ${videoBuffer.length} bytes from Wasabi`);
 
     // Get upload URL from asset
     if (!assetData.upload_url) {
