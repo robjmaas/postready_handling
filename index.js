@@ -393,10 +393,37 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     if (lutUrl) {
       if (lutUrl.startsWith('http')) {
         localLutPath = path.join(tempDir, 'temp_lut.cube');
-        console.log(`📥 Downloading LUT from URL...`);
-        await downloadFile(lutUrl, localLutPath);
+        console.log(`📥 Downloading LUT from URL: ${lutUrl}`);
+        try {
+          await downloadFile(lutUrl, localLutPath);
+          
+          // Check if LUT file is valid (has content)
+          const lutStats = fs.statSync(localLutPath);
+          if (lutStats.size === 0) {
+            console.warn(`⚠️  LUT file is empty, skipping color grading`);
+            localLutPath = null;
+          } else {
+            console.log(`✅ LUT file downloaded (${lutStats.size} bytes)`);
+          }
+        } catch (err) {
+          console.warn(`⚠️  Failed to download LUT: ${err.message}, continuing without color grading`);
+          localLutPath = null;
+        }
       } else {
-        localLutPath = lutUrl;
+        // Local path
+        if (fs.existsSync(lutUrl)) {
+          const stats = fs.statSync(lutUrl);
+          if (stats.size === 0) {
+            console.warn(`⚠️  LUT file is empty: ${lutUrl}`);
+            localLutPath = null;
+          } else {
+            localLutPath = lutUrl;
+            console.log(`✅ Using local LUT file (${stats.size} bytes)`);
+          }
+        } else {
+          console.warn(`⚠️  LUT file not found: ${lutUrl}`);
+          localLutPath = null;
+        }
       }
     }
     
