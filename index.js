@@ -582,20 +582,10 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Verify the video URL is accessible
-    console.log(`   Step 2: Verifying video URL accessibility...`);
-    try {
-      const urlCheck = await fetch(videoUrl, { method: "HEAD" });
-      console.log(`   URL status: ${urlCheck.status}`);
-      console.log(`   Content-Length: ${urlCheck.headers.get("content-length")} bytes`);
-    } catch (err) {
-      console.warn(`   ⚠️  Could not verify URL: ${err.message}`);
-    }
+    // Step 2: Create asset with source parameter (tells Frame.io to fetch from URL)
+    console.log(`   Step 2: Creating asset with source URL...`);
     
-    // Step 3: Create asset WITHOUT realtime mode first
-    console.log(`   Step 3: Creating asset...`);
-    
-    // Create the asset (simple mode)
+    // Create asset with source pointing to Wasabi URL - this tells Frame.io to download it
     const createRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
@@ -607,7 +597,11 @@ async function uploadToFrameIO(videoUrl, filename) {
         body: JSON.stringify({
           name: filename,
           type: "file",
-          filetype: "video/mp4"
+          filetype: "video/mp4",
+          source: {
+            type: "url",
+            url: videoUrl
+          }
         })
       }
     );
@@ -616,92 +610,16 @@ async function uploadToFrameIO(videoUrl, filename) {
     
     if (!createRes.ok) {
       console.error(`❌ Frame.io API error ${createRes.status}`);
-      console.error(`   Endpoint: /v2/assets/${rootAssetId}/children`);
       console.error(`   Response: ${createResponseText}`);
       throw new Error(`Frame.io API error ${createRes.status}: ${createResponseText}`);
     }
 
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
+    console.log(`   Status: ${assetData.status || assetData.asset_type || 'created'}`);
+    console.log(`   Frame.io will download and process the video from source URL`);
     
-    // Step 4: Reading video from Wasabi using S3 SDK (for authenticated access)
-    console.log(`   Step 4: Reading video from Wasabi...`);
-    
-    // Extract filename from URL: https://s3.eu-central-1.wasabisys.com/strawberries/filename.mp4
-    const urlPath = new URL(videoUrl).pathname;
-    // Path is /strawberries/filename.mp4, we need just filename.mp4 (without bucket name)
-    const s3Key = urlPath.split('/').slice(2).join('/'); // Skip first empty part and bucket name
-    console.log(`   S3 Key: ${s3Key}`);
-    
-    // Read file from Wasabi S3 using SDK (authenticated)
-    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-    const getCommand = new GetObjectCommand({
-      Bucket: "strawberries",
-      Key: s3Key
-    });
-    
-    const s3Response = await s3Client.send(getCommand);
-    const videoBuffer = await s3Response.Body.transformToByteArray();
-    console.log(`   Read ${videoBuffer.length} bytes from Wasabi`);
-
-    // Step 5: Upload video to Frame.io using multipart form data
-    console.log(`   Step 5: Uploading ${videoBuffer.length} bytes to Frame.io...`);
-    
-    // Create a readable stream from the buffer
-    const { Readable } = await import('stream');
-    const bufferStream = Readable.from([videoBuffer]);
-    
-    // Try uploading directly to the asset endpoint with multipart form data
-    const FormData = (await import('form-data')).default;
-    const formData = new FormData();
-    formData.append('file', bufferStream, { filename: filename });
-    
-    // Try PUT request first (uploading to the asset)
-    console.log(`   Trying PUT request to asset...`);
-    let uploadRes = await fetch(
-      `https://api.frame.io/v2/assets/${assetData.id}`,
-      {
-        method: "PUT",
-        headers: {
-          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-          ...formData.getHeaders()
-        },
-        body: formData
-      }
-    );
-
-    if (!uploadRes.ok && uploadRes.status === 404) {
-      // Try uploading as a child of the parent folder
-      console.log(`   PUT to asset returned 404, trying POST to parent folder...`);
-      
-      // Re-create the stream since the previous one was consumed
-      const bufferStream2 = Readable.from([videoBuffer]);
-      const formData2 = new FormData();
-      formData2.append('file', bufferStream2, { filename: filename });
-      
-      uploadRes = await fetch(
-        `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-            ...formData2.getHeaders()
-          },
-          body: formData2
-        }
-      );
-    }
-
-    if (!uploadRes.ok) {
-      console.error(`❌ Frame.io upload failed: ${uploadRes.status}`);
-      const errText = await uploadRes.text();
-      console.error(`   Response: ${errText}`);
-      throw new Error(`Upload to Frame.io failed: ${uploadRes.status}`);
-    }
-
-    const uploadResult = await uploadRes.json();
-    console.log(`✅ Video uploaded to Frame.io: ${uploadResult.id || assetData.id} (${videoBuffer.length} bytes)`);
-    return uploadResult;
+    return assetData;
   } catch (err) {
     console.error(`❌ Frame.io upload error:`, err.message);
     return null;
