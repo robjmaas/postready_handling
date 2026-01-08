@@ -363,6 +363,42 @@ async function downloadFile(url, filepath) {
 }
 
 /**
+ * Extract timecode from video metadata using ffprobe
+ */
+async function extractTimecodeFromVideo(videoPath) {
+  return new Promise((resolve) => {
+    const { spawn } = require('child_process');
+    
+    // Use ffprobe to extract timecode from video metadata
+    const ffprobe = spawn('ffprobe', [
+      '-v', 'error',
+      '-show_entries', 'stream=timecode_start',
+      '-of', 'default=noprint_wrappers=1:nokey=1:nw=1',
+      videoPath
+    ]);
+    
+    let output = '';
+    ffprobe.stdout.on('data', (data) => {
+      output += data.toString().trim();
+    });
+    
+    ffprobe.on('close', () => {
+      const timecode = output.trim();
+      // Validate timecode format HH:MM:SS:FF or HH:MM:SS.mmm
+      if (timecode && /^\d{2}:\d{2}:\d{2}[:.]/.test(timecode)) {
+        resolve(timecode);
+      } else {
+        resolve(null);
+      }
+    });
+    
+    ffprobe.on('error', () => {
+      resolve(null);
+    });
+  });
+}
+
+/**
  * Apply timecode and LUT color grading using ffmpeg
  */
 async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
@@ -386,9 +422,17 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     console.log(`📥 Downloading Coconut output...`);
     await downloadFile(inputMp4Url, downloadedMp4);
     
+    // Extract timecode from source video if available
+    let timecodeValue = null;
     if (sourceVideoUrl) {
       console.log(`📥 Downloading source video for timecode extraction...`);
       await downloadFile(sourceVideoUrl, downloadedSource);
+      
+      // Try to extract timecode from source
+      timecodeValue = await extractTimecodeFromVideo(downloadedSource);
+      if (timecodeValue) {
+        console.log(`⏱️  Extracted timecode from source: ${timecodeValue}`);
+      }
     }
     
     // Download LUT file if it's a URL
@@ -463,7 +507,16 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       '-crf', '28',             // Slightly lower quality for faster processing and less memory
       '-bufsize', '5000k',      // Limit buffer size to reduce memory usage
       '-c:a', 'aac',
-      '-b:a', '128k',
+      '-b:a', '128k'
+    );
+    
+    // Add timecode if extracted from source
+    if (timecodeValue) {
+      ffmpegArgs.push('-timecode', timecodeValue);
+      console.log(`⏱️  Setting output timecode: ${timecodeValue}`);
+    }
+    
+    ffmpegArgs.push(
       '-y',
       processedMp4
     );
