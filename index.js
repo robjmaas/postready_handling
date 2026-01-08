@@ -366,8 +366,8 @@ async function downloadFile(url, filepath) {
  * Extract timecode from video metadata using ffprobe
  */
 async function extractTimecodeFromVideo(videoPath) {
-  return new Promise((resolve) => {
-    const { spawn } = require('child_process');
+  return new Promise(async (resolve) => {
+    const { spawn } = await import('child_process');
     
     // Use ffprobe to extract timecode from video metadata
     const ffprobe = spawn('ffprobe', [
