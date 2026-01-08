@@ -507,22 +507,27 @@ async function uploadToWasabi(localFilePath, s3Key) {
  */
 async function uploadToFrameIO(videoUrl, filename) {
   if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
-    console.warn("Frame.io credentials not configured, skipping upload");
+    console.warn("⚠️  Frame.io credentials not configured, skipping upload");
     return null;
   }
 
   try {
-    console.log(`Uploading to Frame.io: ${filename}`);
+    console.log(`📤 Uploading to Frame.io`);
+    console.log(`   Filename: ${filename}`);
+    console.log(`   Video URL: ${videoUrl}`);
+    console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
     
-    // Frame.io API uses multipart form data for file uploads
-    // But since we have a remote URL, we can use their source_url parameter
+    // Frame.io API v2 - create asset with URL source
     const payload = {
       name: filename,
+      type: "file",
       source: {
         type: "url",
         url: videoUrl
       }
     };
+
+    console.log(`   Payload:`, JSON.stringify(payload, null, 2));
 
     const res = await fetch(
       `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
@@ -536,16 +541,28 @@ async function uploadToFrameIO(videoUrl, filename) {
       }
     );
 
+    const responseText = await res.text();
+    
     if (!res.ok) {
-      const error = await res.text();
-      throw new Error(`Frame.io API error ${res.status}: ${error}`);
+      console.error(`❌ Frame.io API error ${res.status}`);
+      console.error(`   Response: ${responseText}`);
+      
+      // 404 might mean project ID is wrong or endpoint changed
+      if (res.status === 404) {
+        console.error(`   Possible causes:`);
+        console.error(`   - Project ID is incorrect: ${FRAMEIO_PROJECT_ID}`);
+        console.error(`   - Frame.io API endpoint format changed`);
+        console.error(`   - User doesn't have access to project`);
+      }
+      
+      throw new Error(`Frame.io API error ${res.status}: ${responseText}`);
     }
 
-    const data = await res.json();
-    console.log(`Video uploaded to Frame.io: ${data.id}`);
+    const data = JSON.parse(responseText);
+    console.log(`✅ Video uploaded to Frame.io: ${data.id}`);
     return data;
   } catch (err) {
-    console.error("Frame.io upload error:", err);
+    console.error(`❌ Frame.io upload error:`, err.message);
     return null;
   }
 }
@@ -1099,11 +1116,13 @@ app.post("/webhooks/coconut", async (req, res) => {
             .then((frameioResult) => {
               if (frameioResult) {
                 console.log(`✅ Successfully uploaded to Frame.io: ${frameioResult.id}`);
+              } else {
+                console.warn(`⚠️  Frame.io upload returned null (may have failed gracefully)`);
               }
             });
         })
         .catch((err) => {
-          console.error(`❌ Post-processing or Frame.io upload failed:`, err);
+          console.error(`❌ Post-processing or Frame.io upload failed:`, err.message);
         });
     } else if (status === "completed" && !outputUrl) {
       console.error(`❌ Job ${jobId} completed but no output URL found - cannot process`);
