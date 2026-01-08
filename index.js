@@ -554,7 +554,10 @@ async function uploadToFrameIO(videoUrl, filename) {
     console.log(`   Video URL: ${videoUrl}`);
     console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
     
-    // Frame.io API v2 - create asset with URL source
+    // Frame.io API v2 - upload to root asset (folder)
+    // The root asset ID is always the project root folder
+    // We'll use the URL-based upload which Frame.io accepts
+    
     const payload = {
       name: filename,
       type: "file",
@@ -564,17 +567,23 @@ async function uploadToFrameIO(videoUrl, filename) {
       }
     };
 
+    console.log(`   Using endpoint: /v2/assets (root folder)`);
     console.log(`   Payload:`, JSON.stringify(payload, null, 2));
 
+    // Try uploading to root folder via assets endpoint
     const res = await fetch(
-      `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
+      `https://api.frame.io/v2/assets`,
       {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({
+          ...payload,
+          parent_asset_id: null,  // Root folder
+          account_id: FRAMEIO_PROJECT_ID  // Project as account
+        })
       }
     );
 
@@ -584,12 +593,28 @@ async function uploadToFrameIO(videoUrl, filename) {
       console.error(`❌ Frame.io API error ${res.status}`);
       console.error(`   Response: ${responseText}`);
       
-      // 404 might mean project ID is wrong or endpoint changed
-      if (res.status === 404) {
-        console.error(`   Possible causes:`);
-        console.error(`   - Project ID is incorrect: ${FRAMEIO_PROJECT_ID}`);
-        console.error(`   - Frame.io API endpoint format changed`);
-        console.error(`   - User doesn't have access to project`);
+      // Try alternate endpoint
+      if (res.status === 404 || res.status === 400) {
+        console.log(`   Trying alternate endpoint with project_id...`);
+        const res2 = await fetch(
+          `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}/assets`,
+          {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+          }
+        );
+        
+        const responseText2 = await res2.text();
+        if (!res2.ok) {
+          throw new Error(`Frame.io API error ${res2.status}: ${responseText2}`);
+        }
+        const data2 = JSON.parse(responseText2);
+        console.log(`✅ Video uploaded to Frame.io: ${data2.id}`);
+        return data2;
       }
       
       throw new Error(`Frame.io API error ${res.status}: ${responseText}`);
