@@ -987,48 +987,78 @@ app.post("/webhooks/coconut", async (req, res) => {
   try {
     console.log("Coconut webhook received:", JSON.stringify(req.body, null, 2));
     
-    const { job } = req.body;
+    // Coconut sends either { job: {...} } or { data: {...} } depending on API version
+    const job = req.body.job || req.body.data;
+    const jobId = job?.id || req.body.job_id;
 
-    if (!job || !job.id) {
-      console.error("Invalid Coconut webhook payload:", req.body);
+    if (!jobId) {
+      console.error("Invalid Coconut webhook payload - missing job ID:", req.body);
       // Return 200 anyway so Coconut doesn't retry
       return res.status(200).json({ error: "Missing job id", received: req.body });
     }
 
-    console.log(`Processing Coconut job ${job.id}:`, job.status);
+    // Normalize status field
+    const rawStatus = job?.status || req.body.status;
+    let isCompleted = false;
+    let isFailed = false;
 
-    // Determine final status
+    if (rawStatus === "completed" || rawStatus === "job.completed") {
+      isCompleted = true;
+    } else if (rawStatus === "failed" || rawStatus === "job.failed" || rawStatus === "cancelled" || rawStatus === "job.cancelled") {
+      isFailed = true;
+    }
+
+    console.log(`Processing Coconut job ${jobId} with status: ${rawStatus}`);
+
+    // Determine final status and extract output URL
     let status = "processing";
     let outputUrl = null;
     let error = null;
 
-    if (job.status === "completed") {
+    if (isCompleted) {
       status = "completed";
-      // Extract output URL from job outputs
-      if (job.output && job.output.mp4) {
-        outputUrl = job.output.mp4.url;
+      
+      // Try to extract MP4 URL from outputs array (new format)
+      if (job?.outputs && Array.isArray(job.outputs)) {
+        const mp4Output = job.outputs.find(o => o.format === "mp4" || o.key === "mp4");
+        if (mp4Output?.url) {
+          outputUrl = mp4Output.url;
+          console.log(`✅ Found MP4 output: ${outputUrl}`);
+        }
       }
-    } else if (job.status === "failed" || job.status === "cancelled") {
+      // Fallback: try old format with job.output.mp4
+      else if (job?.output?.mp4?.url) {
+        outputUrl = job.output.mp4.url;
+        console.log(`✅ Found MP4 output (legacy format): ${outputUrl}`);
+      }
+      
+      if (!outputUrl) {
+        console.warn(`⚠️  No MP4 output URL found in job ${jobId}`);
+        console.log("Job object:", JSON.stringify(job, null, 2));
+      }
+    } else if (isFailed) {
       status = "failed";
-      error = job.errors?.join(", ") || "Unknown error";
+      error = job?.errors?.join(", ") || req.body.error || "Unknown error";
+      console.error(`❌ Job ${jobId} failed: ${error}`);
     }
 
     // Update job status in database
-    await updateCoconutJob(job.id, status, outputUrl, error);
+    await updateCoconutJob(jobId, status, outputUrl, error);
 
-    console.log(`Job ${job.id} status updated to: ${status}`);
+    console.log(`Job ${jobId} status updated to: ${status}`);
     
     // If completed, run ffmpeg post-processing then upload to Frame.io
     if (status === "completed" && outputUrl) {
-      const filename = job.source?.url?.split("/").pop() || `${job.id}.mp4`;
-      const sourceUrl = job.source?.url;
+      // Extract filename from the output URL or use job ID
+      const urlParts = outputUrl.split("/");
+      const filename = urlParts[urlParts.length - 1] || `${jobId}.mp4`;
       
       console.log(`🎬 Starting ffmpeg post-processing for: ${filename}`);
       
-      postProcessWithFFmpeg(outputUrl, sourceUrl, filename)
+      postProcessWithFFmpeg(outputUrl, outputUrl, filename)
         .then((processedUrl) => {
           console.log(`✅ Post-processing complete: ${processedUrl}`);
-          // Update database with processed URL
+          // Upload to Frame.io after post-processing
           return uploadToFrameIO(processedUrl, filename)
             .then((frameioResult) => {
               if (frameioResult) {
@@ -1039,10 +1069,12 @@ app.post("/webhooks/coconut", async (req, res) => {
         .catch((err) => {
           console.error(`❌ Post-processing or Frame.io upload failed:`, err);
         });
+    } else if (status === "completed" && !outputUrl) {
+      console.error(`❌ Job ${jobId} completed but no output URL found - cannot process`);
     }
     
     // Return 200 success (don't wait for Frame.io upload)
-    res.status(200).json({ success: true, jobId: job.id, status });
+    res.status(200).json({ success: true, jobId, status });
   } catch (err) {
     console.error("Webhook error:", err);
     // Still return 200 so Coconut doesn't retry endlessly
