@@ -9,6 +9,18 @@ import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
 import https from "https";
+import http from "http";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+
+// Wasabi S3 client
+const s3Client = new S3Client({
+  endpoint: "https://s3.eu-central-1.wasabisys.com",
+  region: "eu-central-1",
+  credentials: {
+    accessKeyId: "BVH9EMMKPXKS8W50LDV2",
+    secretAccessKey: "daRvOFjpbeJ9DHKlzJ4RQOBA5AdNjpOXkuksA9pM"
+  }
+});
 
 dotenv.config({ quiet: true });   // <— no output
 
@@ -327,7 +339,13 @@ async function getLutUrl() {
 async function downloadFile(url, filepath) {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(filepath);
-    https.get(url, (response) => {
+    const protocol = url.startsWith('https') ? https : http;
+    protocol.get(url, (response) => {
+      // Handle redirects
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        file.close();
+        return downloadFile(response.headers.location, filepath).then(resolve).catch(reject);
+      }
       response.pipe(file);
       file.on('finish', () => {
         file.close();
@@ -344,7 +362,7 @@ async function downloadFile(url, filepath) {
  * Apply timecode and LUT color grading using ffmpeg
  */
 async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
-  const tempDir = "./temp_processing";
+  const tempDir = "/tmp/video_processing";
   if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir, { recursive: true });
   }
@@ -369,27 +387,33 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       await downloadFile(sourceVideoUrl, downloadedSource);
     }
     
-    // Build ffmpeg command with timecode and LUT
-    let ffmpegCmd = `ffmpeg -i "${downloadedMp4}"`;
-    
-    // Add timecode burn-in
-    ffmpegCmd += ` -vf "drawtext=fontfile=/System/Library/Fonts/Monaco.dfont:text='%{pts\\:hms}':fontsize=20:fontcolor=white:box=1:boxcolor=black:x=(w-text_w)/2:y=h-40"`;
-    
-    // Add LUT color grading if available
+    // Download LUT file if it's a URL
+    let localLutPath = null;
     if (lutUrl) {
-      const lutPath = lutUrl.startsWith('http') ? lutUrl : lutUrl;
       if (lutUrl.startsWith('http')) {
-        // Remote LUT - add to filter
-        ffmpegCmd += ` -vf "lut3d=file='${lutPath}'"`;
+        localLutPath = path.join(tempDir, 'temp_lut.cube');
+        console.log(`📥 Downloading LUT from URL...`);
+        await downloadFile(lutUrl, localLutPath);
       } else {
-        // Local LUT file
-        ffmpegCmd += ` -vf "lut3d=${lutPath}"`;
+        localLutPath = lutUrl;
       }
+    }
+    
+    // Build filter chain (combine all filters into one -vf)
+    const filters = [];
+    
+    // Add LUT color grading FIRST if available (before timecode burn-in)
+    if (localLutPath && fs.existsSync(localLutPath)) {
+      filters.push(`lut3d='${localLutPath}'`);
       console.log(`🎨 Applying LUT color grading...`);
     }
     
-    // Output settings
-    ffmpegCmd += ` -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "${processedMp4}" -y`;
+    // Add timecode burn-in (use default font on Linux)
+    filters.push(`drawtext=text='%{pts\\:hms}':fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:x=(w-text_w)/2:y=h-50`);
+    
+    // Build ffmpeg command
+    const filterChain = filters.join(',');
+    const ffmpegCmd = `ffmpeg -i "${downloadedMp4}" -vf "${filterChain}" -c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k "${processedMp4}" -y`;
     
     console.log(`⚙️  Running ffmpeg post-processing...`);
     execSync(ffmpegCmd, { stdio: 'inherit' });
@@ -421,13 +445,21 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
  * Upload a local file to Wasabi S3
  */
 async function uploadToWasabi(localFilePath, s3Key) {
-  // For now, return the expected URL
-  // In production, use AWS SDK or similar to actually upload
-  const wasabiUrl = `https://strawberries.eu-central-1.wasabisys.com/${s3Key}`;
+  console.log(`📤 Uploading to Wasabi: ${s3Key}`);
   
-  // TODO: Implement actual S3 upload using AWS SDK
-  // For now, this is a placeholder that assumes Coconut will handle it
-  console.log(`📌 Wasabi URL: ${wasabiUrl}`);
+  const fileContent = fs.readFileSync(localFilePath);
+  
+  const command = new PutObjectCommand({
+    Bucket: "strawberries",
+    Key: s3Key,
+    Body: fileContent,
+    ContentType: "video/mp4"
+  });
+  
+  await s3Client.send(command);
+  
+  const wasabiUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${s3Key}`;
+  console.log(`✅ Uploaded to Wasabi: ${wasabiUrl}`);
   
   return wasabiUrl;
 }
