@@ -1353,7 +1353,15 @@ app.post("/webhooks/coconut", async (req, res) => {
       }
     } else if (isFailed) {
       status = "failed";
-      error = job?.errors?.join(", ") || req.body.error || "Unknown error";
+      // Capture error from multiple possible locations
+      let errorMsg = job?.errors?.join(", ") || req.body.error || "Unknown error";
+      
+      // Also check for input errors
+      if (job?.input?.error) {
+        errorMsg = `Input error: ${job.input.error}`;
+      }
+      
+      error = errorMsg;
       console.error(`❌ Job ${jobId} failed: ${error}`);
     }
 
