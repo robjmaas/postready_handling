@@ -582,10 +582,31 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Create asset with source parameter (tells Frame.io to fetch from URL)
-    console.log(`   Step 2: Creating asset with source URL...`);
+    // Step 2: Generate a presigned URL that Frame.io can access
+    console.log(`   Step 2: Generating presigned URL for Frame.io access...`);
     
-    // Create asset with source pointing to Wasabi URL - this tells Frame.io to download it
+    // Extract filename from URL: https://s3.eu-central-1.wasabisys.com/strawberries/filename.mp4
+    const urlPath = new URL(videoUrl).pathname;
+    // Path is /strawberries/filename.mp4, we need just filename.mp4 (without bucket name)
+    const s3Key = urlPath.split('/').slice(2).join('/'); // Skip first empty part and bucket name
+    console.log(`   S3 Key: ${s3Key}`);
+    
+    // Generate a presigned URL that's valid for 1 hour
+    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+    const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+    
+    const getCommand = new GetObjectCommand({
+      Bucket: "strawberries",
+      Key: s3Key
+    });
+    
+    const presignedUrl = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
+    console.log(`   Presigned URL generated (valid for 1 hour)`);
+    
+    // Step 3: Create asset with presigned URL as source
+    console.log(`   Step 3: Creating asset with presigned URL...`);
+    
+    // Create asset with source pointing to presigned URL - Frame.io can access this
     const createRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
@@ -600,7 +621,7 @@ async function uploadToFrameIO(videoUrl, filename) {
           filetype: "video/mp4",
           source: {
             type: "url",
-            url: videoUrl
+            url: presignedUrl
           }
         })
       }
@@ -616,8 +637,7 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
-    console.log(`   Status: ${assetData.status || assetData.asset_type || 'created'}`);
-    console.log(`   Frame.io will download and process the video from source URL`);
+    console.log(`   Frame.io will download and process the video from presigned URL`);
     
     return assetData;
   } catch (err) {
