@@ -297,7 +297,7 @@ async function sendToCoconut(downloadUrl, filename) {
       url: COCONUT_WEBHOOK_URL
     },
     outputs: {
-      mp4: {
+      "mp4:1080p::quality=4": {
         key: "mp4:1080p",
         path: `/${safeFilename}.mp4`
       }
@@ -565,7 +565,7 @@ async function uploadToWasabi(localFilePath, s3Key) {
 /**
  * Upload a video to Frame.io
  */
-async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
+async function uploadToFrameIO(videoUrl, filename) {
   if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
     console.warn("⚠️  Frame.io credentials not configured, skipping upload");
     return null;
@@ -576,26 +576,6 @@ async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
     console.log(`   Filename: ${filename}`);
     console.log(`   Video URL: ${videoUrl}`);
     console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
-    
-    // Determine transfer_id for folder organization
-    let transferId = null;
-    if (jobIdOrTransferId) {
-      // If it's a jobId (UUID), look up the transfer_id from database
-      // If it's already a transfer_id (alphanumeric), use it directly
-      if (jobIdOrTransferId.includes('-')) {
-        // Looks like a UUID (jobId), fetch from database
-        const job = await db.get("SELECT transfer_id FROM coconut_jobs WHERE id = ?", [jobIdOrTransferId]);
-        if (job) {
-          transferId = job.transfer_id;
-        }
-      } else {
-        // Looks like a transfer_id, use directly
-        transferId = jobIdOrTransferId;
-      }
-      if (transferId) {
-        console.log(`   Transfer ID (folder): ${transferId}`);
-      }
-    }
     
     // Step 1: Fetch the project details to get root asset ID
     console.log(`   Step 1: Fetching project details...`);
@@ -625,15 +605,12 @@ async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Determine folder name: use transfer_id if available, otherwise fallback to 'dailies'
-    const folderName = transferId || 'dailies';
+    // Step 2: Find or create 'dailies' folder
+    console.log(`   Step 2: Looking for 'dailies' folder...`);
     
-    // Step 2: Find or create folder with appropriate name
-    console.log(`   Step 2: Looking for '${folderName}' folder...`);
+    let dailiesFolderId = null;
     
-    let targetFolderId = null;
-    
-    // Fetch root folder's children to find matching folder
+    // Fetch root folder's children to find 'dailies'
     const childrenRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
@@ -647,16 +624,16 @@ async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
 
     if (childrenRes.ok) {
       const children = await childrenRes.json();
-      const matchingFolder = children.data?.find(child => child.name === folderName && child.type === 'folder');
-      if (matchingFolder) {
-        targetFolderId = matchingFolder.id;
-        console.log(`   Found existing '${folderName}' folder: ${targetFolderId}`);
+      const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
+      if (dailiesFolder) {
+        dailiesFolderId = dailiesFolder.id;
+        console.log(`   Found existing 'dailies' folder: ${dailiesFolderId}`);
       }
     }
 
-    // If folder doesn't exist, create it
-    if (!targetFolderId) {
-      console.log(`   '${folderName}' folder not found, creating...`);
+    // If 'dailies' folder doesn't exist, create it
+    if (!dailiesFolderId) {
+      console.log(`   'dailies' folder not found, creating...`);
       const createFolderRes = await fetch(
         `https://api.frame.io/v2/assets/${rootAssetId}/children`,
         {
@@ -666,7 +643,7 @@ async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
             "Content-Type": "application/json"
           },
           body: JSON.stringify({
-            name: folderName,
+            name: "dailies",
             type: "folder"
           })
         }
@@ -674,10 +651,10 @@ async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
 
       if (createFolderRes.ok) {
         const folderData = await createFolderRes.json();
-        targetFolderId = folderData.id;
-        console.log(`   Created '${folderName}' folder: ${targetFolderId}`);
+        dailiesFolderId = folderData.id;
+        console.log(`   Created 'dailies' folder: ${dailiesFolderId}`);
       } else {
-        throw new Error(`Failed to create '${folderName}' folder: ${createFolderRes.status}`);
+        throw new Error(`Failed to create 'dailies' folder: ${createFolderRes.status}`);
       }
     }
 
@@ -702,12 +679,12 @@ async function uploadToFrameIO(videoUrl, filename, jobIdOrTransferId = null) {
     const presignedUrl = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
     console.log(`   Presigned URL generated (valid for 1 hour)`);
     
-    // Step 4: Create asset in target folder with presigned URL as source
-    console.log(`   Step 4: Creating asset in '${folderName}' folder...`);
+    // Step 4: Create asset in 'dailies' folder with presigned URL as source
+    console.log(`   Step 4: Creating asset in 'dailies' folder...`);
     
     // Create asset with source pointing to presigned URL - Frame.io can access this
     const createRes = await fetch(
-      `https://api.frame.io/v2/assets/${targetFolderId}/children`,
+      `https://api.frame.io/v2/assets/${dailiesFolderId}/children`,
       {
         method: "POST",
         headers: {
@@ -976,7 +953,7 @@ app.post("/sync/wasabi-frameio", async (req, res) => {
     for (const job of jobs) {
       try {
         console.log(`Uploading ${job.filename} from Wasabi to Frame.io...`);
-        const result = await uploadToFrameIO(job.output_url, job.filename, job.id);
+        const result = await uploadToFrameIO(job.output_url, job.filename);
         if (result) {
           synced++;
           console.log(`✅ Synced: ${job.filename} (Frame.io ID: ${result.id})`);
@@ -1347,7 +1324,7 @@ app.post("/webhooks/coconut", async (req, res) => {
           
           // Try to upload to Frame.io after post-processing
           // This is non-blocking - video is already safely stored in Wasabi
-          uploadToFrameIO(processedUrl, filename, jobId)
+          uploadToFrameIO(processedUrl, filename)
             .then((frameioResult) => {
               if (frameioResult) {
                 console.log(`✅ Also uploaded to Frame.io: ${frameioResult.id}`);
