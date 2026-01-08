@@ -414,7 +414,7 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     */
     
     // Add timecode burn-in using drawtext filter
-    // No quotes around text value - ffmpeg will parse it correctly
+    // Simplified: remove special characters that might cause parsing issues
     filters.push(`drawtext=fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=5:text=%{pts\\:hms}:x=(w-text_w)/2:y=h-50`);
     
     // Build ffmpeg arguments array (avoids shell interpretation issues)
@@ -436,19 +436,26 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     console.log(`   Filters: ${filterChain}`);
     console.log(`   Input: ${downloadedMp4}`);
     console.log(`   Output: ${processedMp4}`);
-    console.log(`   Command: ffmpeg ${ffmpegArgs.join(' ')}`);
+    console.log(`   Args:`, ffmpegArgs);
     
     const result = spawnSync('ffmpeg', ffmpegArgs, {
-      stdio: 'inherit',
-      encoding: 'utf-8'
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024  // 10MB buffer for output
     });
     
     if (result.status !== 0) {
       const errorMsg = result.error ? result.error.message : `FFmpeg exited with status ${result.status}`;
       console.error(`❌ FFmpeg failed: ${errorMsg}`);
-      if (result.stderr) console.error(`stderr: ${result.stderr}`);
+      if (result.stdout) {
+        console.error(`STDOUT:\n${result.stdout.slice(-2000)}`);  // Last 2000 chars
+      }
+      if (result.stderr) {
+        console.error(`STDERR:\n${result.stderr.slice(-2000)}`);  // Last 2000 chars
+      }
       throw new Error(`FFmpeg processing failed: ${errorMsg}`);
     }
+    
+    console.log(`✅ FFmpeg encoding complete`);
     
     // Upload processed video back to Wasabi
     console.log(`📤 Uploading processed video to Wasabi...`);
