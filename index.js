@@ -412,7 +412,20 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     // Build FFmpeg arguments
     const ffmpegArgs = [
-      '-i', downloadedMp4,
+      '-i', downloadedMp4
+    ];
+    
+    // Add filters if any exist (must come AFTER -i and input file)
+    if (filters.length > 0) {
+      const filterChain = filters.join(',');
+      ffmpegArgs.push('-vf', filterChain);
+      console.log(`⚙️  Running ffmpeg with filters: ${filterChain}`);
+    } else {
+      console.log(`⚙️  Running ffmpeg basic re-encoding (no filters)`);
+    }
+    
+    // Add rest of encoding options
+    ffmpegArgs.push(
       '-c:v', 'libx264',
       '-preset', 'fast',
       '-crf', '23',
@@ -420,16 +433,7 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       '-b:a', '128k',
       '-y',
       processedMp4
-    ];
-    
-    // Add filters if any exist
-    if (filters.length > 0) {
-      const filterChain = filters.join(',');
-      ffmpegArgs.splice(1, 0, '-vf', filterChain);  // Insert after -i
-      console.log(`⚙️  Running ffmpeg with filters: ${filterChain}`);
-    } else {
-      console.log(`⚙️  Running ffmpeg basic re-encoding (no filters)`);
-    }
+    );
     
     console.log(`   Input: ${downloadedMp4}`);
     console.log(`   Output: ${processedMp4}`);
