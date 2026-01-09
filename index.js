@@ -12,6 +12,7 @@ import https from "https";
 import http from "http";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { Upload } from "@aws-sdk/lib-storage";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
 dotenv.config({ quiet: true });   // <— no output
@@ -423,84 +424,102 @@ async function sendToCoconut(downloadUrl, filename) {
 }
 
 /**
- * Stage video file to S3 for MediaConvert processing
- * Streams directly from Filemail to AWS S3 (no local disk staging)
+ * Stage video file directly from Filemail to AWS S3 using streaming
+ * Eliminates disk storage requirement - works with files of any size (50GB+)
+ * Uses multipart upload for reliable transfer of large files
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
   const stagingKey = `staging/${Date.now()}_${safeFilename}`;
-  const tempLocalPath = `/tmp/${stagingKey.split('/')[1]}`;
   
-  // Wrap in timeout - 60 minutes max for very large files (direct streaming)
-  return Promise.race([
-    stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath),
-    new Promise((_, reject) => 
-      setTimeout(() => reject(new Error("S3 staging timeout after 60 minutes")), 60 * 60 * 1000)
-    )
-  ]);
-}
-
-async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath) {
-  try {
-    console.log(`📥 Staging to AWS S3 (for MediaConvert): ${filename}`);
-    console.log(`   S3 key: ${stagingKey}`);
-    
-    // Download from Filemail to temp file (240 min timeout for very large files)
-    console.log(`   Downloading from Filemail (timeout: 4 hours)...`);
-    const startTime = Date.now();
-    await downloadFileWithTimeout(downloadUrl, tempLocalPath, 4 * 60 * 60 * 1000);
-    const dlTime = (Date.now() - startTime) / 1000;
-    console.log(`   ✅ Downloaded in ${(dlTime / 60).toFixed(1)} minutes`);
-    
-    // Upload to AWS S3 staging area
-    console.log(`   Uploading to AWS S3...`);
-    
-    // Try to create bucket if it doesn't exist (will fail silently if it already exists)
+  return new Promise((resolve, reject) => {
     try {
-      const createBucketCommand = new CreateBucketCommand({
-        Bucket: "postready-staging"
+      console.log(`📥 Streaming to AWS S3 (no disk storage): ${filename}`);
+      console.log(`   S3 key: ${stagingKey}`);
+      console.log(`   Downloading and uploading simultaneously (zero-copy streaming)...`);
+      
+      const protocol = downloadUrl.startsWith('https') ? https : http;
+      let bytesDownloaded = 0;
+      let lastLogTime = Date.now();
+      
+      // Start downloading from Filemail
+      const req = protocol.get(downloadUrl, { timeout: 4 * 60 * 60 * 1000 }, (response) => {
+        // Handle redirects
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          console.log(`   Following redirect...`);
+          return stageFileToS3(response.headers.location, filename).then(resolve).catch(reject);
+        }
+        
+        if (response.statusCode !== 200) {
+          return reject(new Error(`HTTP ${response.statusCode}: ${downloadUrl}`));
+        }
+        
+        // Get file size from Content-Length header
+        const fileSize = parseInt(response.headers['content-length'] || '0', 10);
+        if (fileSize > 0) {
+          console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
+        }
+        
+        // Track download progress
+        response.on('data', (chunk) => {
+          bytesDownloaded += chunk.length;
+          const now = Date.now();
+          
+          // Log progress every 30 seconds
+          if (now - lastLogTime > 30 * 1000) {
+            const gbDownloaded = (bytesDownloaded / 1024 / 1024 / 1024).toFixed(2);
+            console.log(`   📥 Streamed: ${gbDownloaded} GB (uploading simultaneously...)`);
+            lastLogTime = now;
+          }
+        });
+        
+        // Ensure bucket exists (non-blocking)
+        awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
+          .catch(() => {}); // Ignore errors, bucket likely exists
+        
+        // Stream directly to S3 using multipart upload (handles unlimited file sizes)
+        const upload = new Upload({
+          client: awsS3Client,
+          params: {
+            Bucket: "postready-staging",
+            Key: stagingKey,
+            Body: response,
+            ContentType: "video/mxf"
+          },
+          partSize: 50 * 1024 * 1024, // 50MB parts (good for large files)
+          queueSize: 4 // 4 concurrent parts
+        });
+        
+        upload.done()
+          .then(() => {
+            console.log(`   ✅ Streamed to AWS S3: s3://postready-staging/${stagingKey}`);
+            resolve({ 
+              s3Url: `s3://postready-staging/${stagingKey}`, 
+              stagingKey,
+              tempLocalPath: null // No temp file in streaming mode
+            });
+          })
+          .catch((err) => {
+            console.error(`❌ S3 staging failed: ${err.message}`);
+            reject(err);
+          });
       });
-      await awsS3Client.send(createBucketCommand);
-      console.log(`   ✅ Bucket created`);
-    } catch (bucketErr) {
-      // Bucket already exists or other error - continue anyway
-      if (bucketErr.name === "BucketAlreadyOwnedByYou") {
-        console.log(`   ℹ️  Bucket already exists`);
-      } else if (bucketErr.code === "BucketAlreadyExists") {
-        console.log(`   ℹ️  Bucket already exists (owned by another account)`);
-      } else {
-        console.log(`   ⚠️  Bucket status: ${bucketErr.message}`);
-      }
+      
+      req.on('error', (err) => {
+        console.error(`❌ Download failed: ${err.message}`);
+        reject(err);
+      });
+      
+      req.on('timeout', () => {
+        req.abort();
+        reject(new Error("Download timeout (4 hours exceeded)"));
+      });
+      
+    } catch (err) {
+      console.error(`❌ S3 staging error: ${err.message}`);
+      reject(err);
     }
-    
-    const fileStream = fs.createReadStream(tempLocalPath);
-    
-    const putCommand = new PutObjectCommand({
-      Bucket: "postready-staging",
-      Key: stagingKey,
-      Body: fileStream,
-      ContentType: "video/mxf"
-    });
-    
-    await awsS3Client.send(putCommand);
-    console.log(`   ✅ Uploaded to AWS S3`);
-    
-    // Clean up temp file
-    try {
-      fs.unlinkSync(tempLocalPath);
-    } catch (e) {
-      // Ignore cleanup errors
-    }
-    
-    const s3Url = `s3://postready-staging/${stagingKey}`;
-    console.log(`✅ File staged at: ${s3Url}`);
-    
-    return { s3Url, stagingKey, tempLocalPath };
-    
-  } catch (err) {
-    console.error(`❌ S3 staging failed: ${err.message}`);
-    throw err;
-  }
+  });
 }
 
 /**
