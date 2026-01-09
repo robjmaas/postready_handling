@@ -22,6 +22,9 @@ const s3Client = new S3Client({
   }
 });
 
+// Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
+let frameIODailiesFolderId = null;
+
 dotenv.config({ quiet: true });   // <— no output
 
 // Create luts directory if it doesn't exist
@@ -710,57 +713,63 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Find or create 'dailies' folder
-    console.log(`   Step 2: Looking for 'dailies' folder...`);
+    // Step 2: Find or create 'dailies' folder (only once, cached globally)
+    let dailiesFolderId = frameIODailiesFolderId;
     
-    let dailiesFolderId = null;
-    
-    // Fetch root folder's children to find 'dailies'
-    const childrenRes = await fetch(
-      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-      {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    if (childrenRes.ok) {
-      const children = await childrenRes.json();
-      const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
-      if (dailiesFolder) {
-        dailiesFolderId = dailiesFolder.id;
-        console.log(`   Found existing 'dailies' folder: ${dailiesFolderId}`);
-      }
-    }
-
-    // If 'dailies' folder doesn't exist, create it
     if (!dailiesFolderId) {
-      console.log(`   'dailies' folder not found, creating...`);
-      const createFolderRes = await fetch(
+      console.log(`   Step 2: Looking for 'dailies' folder (first time)...`);
+      
+      // Fetch root folder's children to find 'dailies'
+      const childrenRes = await fetch(
         `https://api.frame.io/v2/assets/${rootAssetId}/children`,
         {
-          method: "POST",
+          method: "GET",
           headers: {
             "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
             "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            name: "dailies",
-            type: "folder"
-          })
+          }
         }
       );
 
-      if (createFolderRes.ok) {
-        const folderData = await createFolderRes.json();
-        dailiesFolderId = folderData.id;
-        console.log(`   Created 'dailies' folder: ${dailiesFolderId}`);
-      } else {
-        throw new Error(`Failed to create 'dailies' folder: ${createFolderRes.status}`);
+      if (childrenRes.ok) {
+        const children = await childrenRes.json();
+        const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
+        if (dailiesFolder) {
+          dailiesFolderId = dailiesFolder.id;
+          frameIODailiesFolderId = dailiesFolderId;  // Cache it
+          console.log(`   Found existing 'dailies' folder: ${dailiesFolderId}`);
+        }
       }
+
+      // If 'dailies' folder doesn't exist, create it
+      if (!dailiesFolderId) {
+        console.log(`   'dailies' folder not found, creating...`);
+        const createFolderRes = await fetch(
+          `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+          {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              name: "dailies",
+              type: "folder"
+            })
+          }
+        );
+
+        if (createFolderRes.ok) {
+          const folderData = await createFolderRes.json();
+          dailiesFolderId = folderData.id;
+          frameIODailiesFolderId = dailiesFolderId;  // Cache it
+          console.log(`   Created 'dailies' folder: ${dailiesFolderId}`);
+        } else {
+          throw new Error(`Failed to create 'dailies' folder: ${createFolderRes.status}`);
+        }
+      }
+    } else {
+      console.log(`   Step 2: Using cached dailies folder ID: ${dailiesFolderId}`);
     }
 
     // Step 3: Generate a presigned URL that Frame.io can access
