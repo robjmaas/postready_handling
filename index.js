@@ -1093,7 +1093,6 @@ async function uploadToFrameIO(videoUrl, filename) {
   try {
     console.log(`📤 Uploading to Frame.io`);
     console.log(`   Filename: ${filename}`);
-    console.log(`   Video URL: ${videoUrl}`);
     console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
     
     // Step 1: Fetch the project details to get root asset ID
@@ -1210,30 +1209,10 @@ async function uploadToFrameIO(videoUrl, filename) {
       console.log(`   Step 2: Using cached dailies folder ID: ${dailiesFolderId}`);
     }
 
-    // Step 3: Generate a presigned URL that Frame.io can access
-    console.log(`   Step 3: Generating presigned URL for Frame.io access...`);
-    
-    // Extract filename from URL: https://s3.eu-central-1.wasabisys.com/strawberries/filename.mp4
-    const urlPath = new URL(videoUrl).pathname;
-    // Path is /strawberries/filename.mp4, we need just filename.mp4 (without bucket name)
-    const s3Key = urlPath.split('/').slice(2).join('/'); // Skip first empty part and bucket name
-    console.log(`   S3 Key: ${s3Key}`);
-    
-    // Generate a presigned URL that's valid for 1 hour
-    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-    const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
-    
-    const getCommand = new GetObjectCommand({
-      Bucket: "strawberries",
-      Key: s3Key
-    });
-    
-    const presignedUrl = await getSignedUrl(s3Client, getCommand, { expiresIn: 3600 });
-    console.log(`   Presigned URL generated (valid for 1 hour)`);
-    
-    // Step 4: Create asset in 'dailies' folder with presigned URL as source
-    console.log(`   Step 4: Creating asset in 'dailies' folder...`);
-    console.log(`   Presigned URL: ${presignedUrl.substring(0, 100)}...`);
+    // Step 3: Create asset in 'dailies' folder with presigned URL as source
+    // videoUrl is already a presigned S3 URL, valid for 7 days
+    console.log(`   Step 3: Creating asset in 'dailies' folder...`);
+    console.log(`   Presigned S3 URL (first 100 chars): ${videoUrl.substring(0, 100)}...`);
     
     // Create asset with source pointing to presigned URL - Frame.io can access this
     const requestBody = {
@@ -1241,7 +1220,7 @@ async function uploadToFrameIO(videoUrl, filename) {
       type: "file",
       source: {
         type: "url",
-        url: presignedUrl
+        url: videoUrl
       }
     };
     
@@ -1264,14 +1243,13 @@ async function uploadToFrameIO(videoUrl, filename) {
     if (!createRes.ok) {
       console.error(`❌ Frame.io API error ${createRes.status}`);
       console.error(`   Response: ${createResponseText}`);
-      console.error(`   Presigned URL length: ${presignedUrl.length}`);
       console.error(`   Request body was: ${JSON.stringify(requestBody)}`);
       throw new Error(`Frame.io API error ${createRes.status}: ${createResponseText}`);
     }
 
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
-    console.log(`   Frame.io will download and process the video from presigned URL`);
+    console.log(`   Frame.io will download and process the video from presigned S3 URL`);
     
     return assetData;
   } catch (err) {
