@@ -200,13 +200,19 @@ async function getFilemailFiles(transferId) {
   const res = await fetch(
     `https://api-public.filemail.com/transfer/${transferId}`,
     {
-        headers: {
+      headers: {
         "x-api-key": FILEMAIL_API_KEY,
-        "x-api-version": 2.0
+        "x-api-version": "2.0"
+      }
     }
-  });
+  );
 
-  if (!res.ok) throw new Error("Filemail request failed");
+  if (!res.ok) {
+    const errorText = await res.text();
+    console.error(`Filemail API error: ${res.status} ${res.statusText}`);
+    console.error(`Response: ${errorText}`);
+    throw new Error(`Filemail request failed: ${res.status} ${errorText}`);
+  }
 
   const data = await res.json();
   console.log("Filemail transfer data:", JSON.stringify(data, null, 2));
@@ -226,57 +232,61 @@ function isVideoFile(filename) {
 }
 
 async function processFilemailTransfer(transferId) {
-  console.log("Processing Filemail transfer:", transferId);
-  console.log("Fetching Filemail files...");
-  const files = await getFilemailFiles(transferId);
-  console.log("Found files:", files);
+  try {
+    console.log("Processing Filemail transfer:", transferId);
+    console.log("Fetching Filemail files...");
+    const files = await getFilemailFiles(transferId);
+    console.log("Found files:", files);
 
-  // Filter to video files only
-  const videoFiles = files.filter(f => isVideoFile(f.filename));
-  
-  // Show summary before processing
-  console.log("\n" + "=".repeat(60));
-  console.log("📋 TRANSFER SUMMARY");
-  console.log("=".repeat(60));
-  console.log(`Transfer ID: ${transferId}`);
-  console.log(`Total files: ${files.length}`);
-  console.log(`Video files to process: ${videoFiles.length}`);
-  console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
-  console.log("=".repeat(60) + "\n");
+    // Filter to video files only
+    const videoFiles = files.filter(f => isVideoFile(f.filename));
+    
+    // Show summary before processing
+    console.log("\n" + "=".repeat(60));
+    console.log("📋 TRANSFER SUMMARY");
+    console.log("=".repeat(60));
+    console.log(`Transfer ID: ${transferId}`);
+    console.log(`Total files: ${files.length}`);
+    console.log(`Video files to process: ${videoFiles.length}`);
+    console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
+    console.log("=".repeat(60) + "\n");
 
-  for (const file of files) {
-    // Only process video files
-    if (!isVideoFile(file.filename)) {
-      console.log("Skipping non-video file:", file.filename);
-      continue;
-    }
-    
-    // Check if job already exists (avoid duplicate Coconut submissions)
-    if (await jobExists(transferId, file.filename)) {
-      console.log("Job already exists for:", file.filename, "- skipping to avoid duplicate cost");
-      continue;
-    }
-    
-    console.log("Creating Coconut job for:", file.filename);
-    try {
-      // Download from Filemail and upload to Wasabi to get a stable public URL
-      console.log(`📥 Downloading from Filemail: ${file.filename}`);
-      const stagedUrl = await stageFileToWasabi(file.downloadurl, file.filename);
-      console.log(`✅ Staged to Wasabi: ${stagedUrl}`);
+    for (const file of files) {
+      // Only process video files
+      if (!isVideoFile(file.filename)) {
+        console.log("Skipping non-video file:", file.filename);
+        continue;
+      }
       
-      // Now submit to Coconut with the stable Wasabi URL
-      const result = await sendToCoconut(stagedUrl, file.filename);
-      console.log("Coconut job created:", result.id);
+      // Check if job already exists (avoid duplicate Coconut submissions)
+      if (await jobExists(transferId, file.filename)) {
+        console.log("Job already exists for:", file.filename, "- skipping to avoid duplicate cost");
+        continue;
+      }
       
-      // Store job in database
-      await storeCoconutJob(result.id, transferId, file.filename);
-      console.log("Job stored in database:", result.id);
-    } catch (err) {
-      console.error("Coconut error for file:", file.filename, err);
+      console.log("Creating Coconut job for:", file.filename);
+      try {
+        // Download from Filemail and upload to Wasabi to get a stable public URL
+        console.log(`📥 Downloading from Filemail: ${file.filename}`);
+        const stagedUrl = await stageFileToWasabi(file.downloadurl, file.filename);
+        console.log(`✅ Staged to Wasabi: ${stagedUrl}`);
+        
+        // Now submit to Coconut with the stable Wasabi URL
+        const result = await sendToCoconut(stagedUrl, file.filename);
+        console.log("Coconut job created:", result.id);
+        
+        // Store job in database
+        await storeCoconutJob(result.id, transferId, file.filename);
+        console.log("Job stored in database:", result.id);
+      } catch (err) {
+        console.error("Coconut error for file:", file.filename, err.message);
+      }
     }
+
+    console.log("Waiting for Coconut webhooks...");
+  } catch (err) {
+    console.error("❌ Error processing transfer:", transferId, err.message);
   }
-
-  console.log("Waiting for Coconut webhooks...");
 }
 
 /**
@@ -352,7 +362,7 @@ async function sendToCoconut(downloadUrl, filename) {
       url: COCONUT_WEBHOOK_URL
     },
     outputs: {
-      "mp4:1080p::quality=4": {
+      "mp4:1080p::quality=5": {
         key: "mp4:1080p",
         path: `/${safeFilename}.mp4`
       }
