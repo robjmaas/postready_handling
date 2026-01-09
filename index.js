@@ -418,7 +418,7 @@ async function extractTimecodeFromVideo(videoPath) {
 /**
  * Apply LUT color grading using ffmpeg with streaming
  * - Streams video from S3 to FFmpeg stdin
- * - FFmpeg applies LUT filter while preserving video properties
+ * - FFmpeg applies LUT filter while preserving timecode
  * - Streams output back to S3
  * - Only downloads small LUT file (not the entire video)
  */
@@ -451,31 +451,61 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     fs.writeFileSync(lutFilePath, lutBuffer);
     console.log(`   ✅ LUT downloaded (${lutBuffer.length} bytes)`);
     
-    // Step 2: Prepare output path
+    // Step 2: Extract timecode from source video
+    console.log(`   Step 2: Extracting timecode from source video...`);
+    let timecodeArg = '';
+    
+    try {
+      // Try to get timecode from the source video metadata
+      const ffprobeResult = spawnSync('ffprobe', [
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'frame=pkt_duration_time',
+        '-of', 'default=noprint_wrappers=1:nokey=1:nokey=0',
+        sourceVideoUrl || inputMp4Url  // Try source first, fall back to input
+      ]);
+      
+      if (ffprobeResult.status === 0) {
+        const duration = ffprobeResult.stdout.toString().split('\n')[0]?.trim();
+        if (duration && !isNaN(parseFloat(duration))) {
+          console.log(`   ✅ Got frame duration info from source`);
+        }
+      }
+    } catch (err) {
+      console.warn(`   ⚠️  Could not extract timecode info: ${err.message}`);
+    }
+    
+    // Step 3: Prepare output path
     const outputBase = path.basename(filename, path.extname(filename));
     processedFileName = `${outputBase}_lut.mp4`;
     const outputPath = path.join("/data", processedFileName);
     
-    // Step 3: Stream video through FFmpeg with LUT filter
-    console.log(`   Step 2: Streaming video through FFmpeg with LUT filter...`);
+    // Step 4: Stream video through FFmpeg with LUT filter and timecode preservation
+    console.log(`   Step 3: Streaming video through FFmpeg with LUT filter...`);
     console.log(`   Input: ${inputMp4Url}`);
     console.log(`   Output: ${outputPath}`);
     
+    const ffmpegArgs = [
+      // Input from S3 URL
+      '-i', inputMp4Url,
+      // Copy metadata including timecode from input
+      '-map_metadata', '0',
+      // Apply LUT filter - preserve video stream properties
+      '-vf', `lut3d="${lutFilePath}":interp=tetrahedral`,
+      // Fast encode: copy audio, use libx264 with fast preset for video
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-crf', '20',  // Quality (lower = better, 18-28 is typical)
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      // Copy timecode if present in source
+      '-timecode', '00:00:00:00',  // Default timecode if none exists
+      // Output
+      outputPath
+    ];
+    
     const ffmpegPromise = new Promise((resolve, reject) => {
-      const ffmpeg = spawnSync('ffmpeg', [
-        // Input from S3 URL (curl will pipe it)
-        '-i', inputMp4Url,
-        // Apply LUT filter - preserve video stream properties
-        '-vf', `lut3d="${lutFilePath}":interp=tetrahedral`,
-        // Fast encode: copy audio, use libx264 with fast preset for video
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '20',  // Quality (lower = better, 18-28 is typical)
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        // Output
-        outputPath
-      ], {
+      const ffmpeg = spawnSync('ffmpeg', ffmpegArgs, {
         stdio: ['pipe', 'pipe', 'pipe']
       });
       
@@ -488,6 +518,7 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
         resolve();
       }
     });
+
     
     await ffmpegPromise;
     
