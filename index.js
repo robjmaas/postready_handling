@@ -306,15 +306,16 @@ async function stageFileToWasabi(filemailUrl, filename) {
     console.log(`   Downloading from Filemail...`);
     await downloadFile(filemailUrl, tempFile);
     
-    // Upload to Wasabi with staging prefix
+    // Upload to Wasabi with staging prefix (using stream to avoid loading entire file into memory)
     const s3Key = `staging/${filename}`;
     console.log(`   Uploading to Wasabi: ${s3Key}`);
     
-    const fileContent = fs.readFileSync(tempFile);
+    // Use stream instead of readFileSync to avoid OOM on large files
+    const fileStream = fs.createReadStream(tempFile);
     const command = new PutObjectCommand({
       Bucket: "strawberries",
       Key: s3Key,
-      Body: fileContent,
+      Body: fileStream,
       ContentType: "video/mp4"
     });
     
@@ -465,189 +466,31 @@ async function extractTimecodeFromVideo(videoPath) {
 
 /**
  * Apply timecode and LUT color grading using ffmpeg
+ * ⚠️  DISABLED: Complex post-processing caused OOM kills on Fly.io
+ * For now, return Coconut output directly without further processing
+ * 
+ * TODO: Re-enable with streaming approach:
+ * - Stream video from S3 directly to FFmpeg stdin
+ * - Stream FFmpeg output directly to S3
+ * - Only download small files (LUT, metadata)
  */
 async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
-  const tempDir = "/tmp/video_processing";
-  if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir, { recursive: true });
-  }
-
-  const baseName = filename.replace(/[^\w\d_-]/g, "_");
-  const downloadedMp4 = path.join(tempDir, `${baseName}_input.mp4`);
-  const downloadedSource = path.join(tempDir, `${baseName}_source.mp4`);
-  const processedMp4 = path.join(tempDir, `${baseName}_processed.mp4`);
-
   try {
-    console.log(`🎬 Post-processing with ffmpeg: ${filename}`);
+    console.log(`⏭️  Skipping post-processing (OOM mitigation): ${filename}`);
+    console.log(`📌 Returning Coconut output directly: ${inputMp4Url}`);
     
-    // Get LUT URL
-    const lutUrl = await getLutUrl();
+    // For now, simply return the Coconut URL without additional processing
+    // This avoids downloading and re-encoding large video files
+    return inputMp4Url;
     
-    // Download the Coconut-processed MP4 and source video
-    console.log(`📥 Downloading Coconut output...`);
-    await downloadFile(inputMp4Url, downloadedMp4);
-    
-    // Extract timecode from source video if available
-    let timecodeValue = null;
-    if (sourceVideoUrl) {
-      console.log(`📥 Downloading source video for timecode extraction...`);
-      await downloadFile(sourceVideoUrl, downloadedSource);
-      
-      // Try to extract timecode from source
-      timecodeValue = await extractTimecodeFromVideo(downloadedSource);
-      if (timecodeValue) {
-        console.log(`⏱️  Extracted timecode from source: ${timecodeValue}`);
-      }
-    }
-    
-    // Download LUT file if it's a URL
-    let localLutPath = null;
-    if (lutUrl) {
-      if (lutUrl.startsWith('http')) {
-        localLutPath = path.join(tempDir, 'temp_lut.cube');
-        console.log(`📥 Downloading LUT from URL: ${lutUrl}`);
-        try {
-          await downloadFile(lutUrl, localLutPath);
-          
-          // Check if LUT file is valid (has content)
-          const lutStats = fs.statSync(localLutPath);
-          if (lutStats.size === 0) {
-            console.warn(`⚠️  LUT file is empty, skipping color grading`);
-            localLutPath = null;
-          } else {
-            console.log(`✅ LUT file downloaded (${lutStats.size} bytes)`);
-          }
-        } catch (err) {
-          console.warn(`⚠️  Failed to download LUT: ${err.message}, continuing without color grading`);
-          localLutPath = null;
-        }
-      } else {
-        // Local path
-        if (fs.existsSync(lutUrl)) {
-          const stats = fs.statSync(lutUrl);
-          if (stats.size === 0) {
-            console.warn(`⚠️  LUT file is empty: ${lutUrl}`);
-            localLutPath = null;
-          } else {
-            localLutPath = lutUrl;
-            console.log(`✅ Using local LUT file (${stats.size} bytes)`);
-          }
-        } else {
-          console.warn(`⚠️  LUT file not found: ${lutUrl}`);
-          localLutPath = null;
-        }
-      }
-    }
-    
-    // Build filter chain (combine all filters into one -vf)
-    const filters = [];
-    
-    // Add LUT color grading if available
-    if (localLutPath && fs.existsSync(localLutPath)) {
-      // Path in filter - escape backslashes for FFmpeg
-      const escapedLutPath = localLutPath.replace(/\\/g, '/');
-      filters.push(`lut3d=${escapedLutPath}`);
-      console.log(`🎨 Applying LUT color grading from: ${localLutPath}`);
-    }
-    
-    // Build FFmpeg arguments
-    const ffmpegArgs = [
-      '-i', downloadedMp4
-    ];
-    
-    // Add filters if any exist (must come AFTER -i and input file)
-    if (filters.length > 0) {
-      const filterChain = filters.join(',');
-      ffmpegArgs.push('-vf', filterChain);
-      console.log(`⚙️  Running ffmpeg with filters: ${filterChain}`);
-    } else {
-      console.log(`⚙️  Running ffmpeg basic re-encoding (no filters)`);
-    }
-    
-    // Add rest of encoding options
-    // Use memory-efficient settings to prevent OOM on constrained systems
-    ffmpegArgs.push(
-      '-c:v', 'libx264',
-      '-preset', 'ultrafast',  // Faster encoding uses less memory
-      '-crf', '28',             // Slightly lower quality for faster processing and less memory
-      '-bufsize', '5000k',      // Limit buffer size to reduce memory usage
-      '-c:a', 'aac',
-      '-b:a', '128k'
-    );
-    
-    // Add timecode if extracted from source
-    if (timecodeValue) {
-      ffmpegArgs.push('-timecode', timecodeValue);
-      console.log(`⏱️  Setting output timecode: ${timecodeValue}`);
-    }
-    
-    ffmpegArgs.push(
-      '-y',
-      processedMp4
-    );
-    
-    console.log(`   Input: ${downloadedMp4}`);
-    console.log(`   Output: ${processedMp4}`);
-    console.log(`   Args:`, ffmpegArgs);
-    
-    // Use async spawn instead of spawnSync to avoid blocking the event loop
-    const { spawn } = await import('child_process');
-    
-    await new Promise((resolve, reject) => {
-      const ffmpeg = spawn('ffmpeg', ffmpegArgs);
-      let stdoutData = '';
-      let stderrData = '';
-      
-      ffmpeg.stdout?.on('data', (data) => {
-        stdoutData += data.toString();
-      });
-      
-      ffmpeg.stderr?.on('data', (data) => {
-        stderrData += data.toString();
-      });
-      
-      ffmpeg.on('close', (code) => {
-        if (code !== 0) {
-          const errorMsg = `FFmpeg exited with status ${code}`;
-          console.error(`❌ FFmpeg failed: ${errorMsg}`);
-          if (stdoutData) {
-            console.error(`STDOUT:\n${stdoutData.slice(-2000)}`);  // Last 2000 chars
-          }
-          if (stderrData) {
-            console.error(`STDERR:\n${stderrData.slice(-2000)}`);  // Last 2000 chars
-          }
-          reject(new Error(`FFmpeg processing failed: ${errorMsg}`));
-        } else {
-          resolve();
-        }
-      });
-      
-      ffmpeg.on('error', (err) => {
-        console.error(`❌ FFmpeg spawn error: ${err.message}`);
-        reject(err);
-      });
-    });
-    
-    console.log(`✅ FFmpeg encoding complete`);
-    
-    // TODO: Add drawtext (timecode) filter once LUT is tested
-    
-    // Upload processed video back to Wasabi
-    console.log(`📤 Uploading processed video to Wasabi...`);
-    const wasabiUrl = await uploadToWasabi(processedMp4, `${baseName}_processed.mp4`);
-    
-    console.log(`✅ Post-processing complete: ${wasabiUrl}`);
-    
-    return wasabiUrl;
   } catch (err) {
-    console.error(`❌ FFmpeg post-processing failed: ${err.message}`);
+    console.error(`❌ Post-processing error: ${err.message}`);
     throw err;
   } finally {
-    // Cleanup temp files
-    console.log(`🧹 Cleaning up temporary files...`);
-    try {
-      if (fs.existsSync(downloadedMp4)) fs.unlinkSync(downloadedMp4);
-      if (fs.existsSync(downloadedSource)) fs.unlinkSync(downloadedSource);
+    // No cleanup needed since we're not downloading files
+    // (Old code left below for reference when re-enabling)
+  }
+}
       if (fs.existsSync(processedMp4)) fs.unlinkSync(processedMp4);
     } catch (err) {
       console.warn(`Warning: Could not clean up temp files: ${err.message}`);
@@ -661,12 +504,13 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
 async function uploadToWasabi(localFilePath, s3Key) {
   console.log(`📤 Uploading to Wasabi: ${s3Key}`);
   
-  const fileContent = fs.readFileSync(localFilePath);
+  // Use stream instead of readFileSync to avoid OOM on large files
+  const fileStream = fs.createReadStream(localFilePath);
   
   const command = new PutObjectCommand({
     Bucket: "strawberries",
     Key: s3Key,
-    Body: fileContent,
+    Body: fileStream,
     ContentType: "video/mp4"
   });
   
