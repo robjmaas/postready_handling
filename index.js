@@ -2065,8 +2065,7 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
     
     if (job.Status === "COMPLETE") {
       console.log(`✅ Job complete! Extracting output...`);
-      console.log(`   Full job keys:`, Object.keys(job));
-      console.log(`   OutputGroupDetails:`, JSON.stringify(job.OutputGroupDetails, null, 2));
+      console.log(`   Settings.OutputGroups:`, JSON.stringify(job.Settings?.OutputGroups, null, 2));
       
       // Extract output file path
       if (job.OutputGroupDetails?.[0]?.OutputDetails?.[0]?.OutputFilePaths?.[0]) {
