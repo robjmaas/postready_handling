@@ -592,7 +592,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
           OutputGroupSettings: {
             Type: "FILE_GROUP_SETTINGS",
             FileGroupSettings: {
-              Destination: "s3://postready-staging/outputs/"
+              Destination: "s3://postready-staging/outputs"
             }
           },
           Outputs: [
