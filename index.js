@@ -2065,37 +2065,52 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
     
     if (job.Status === "COMPLETE") {
       console.log(`✅ Job complete! Extracting output...`);
-      console.log(`   Settings.OutputGroups:`, JSON.stringify(job.Settings?.OutputGroups, null, 2));
       
-      // Extract output file path
-      if (job.OutputGroupDetails?.[0]?.OutputDetails?.[0]?.OutputFilePaths?.[0]) {
-        const outputPath = job.OutputGroupDetails[0].OutputDetails[0].OutputFilePaths[0];
-        console.log(`Output: ${outputPath}`);
-        
-        // Extract just the filename from the S3 path
-        const outputKey = outputPath.split("/outputs/")[1];
-        console.log(`Output key: ${outputKey}`);
-        
-        // Get signed URL for Frame.io
-        const signedUrl = await getSignedS3Url(outputKey);
-        console.log(`✅ Generated signed S3 URL for Frame.io`);
-        
-        // Update job in database with AWS S3 URL
-        const s3Url = `s3://postready-staging/outputs/${outputKey}`;
-        await updateCoconutJob(jobId, "completed", s3Url);
-        
-        // Upload to Frame.io using signed URL
-        uploadToFrameIO(signedUrl, outputKey)
-          .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
-        
-        return res.status(200).json({ 
-          success: true, 
-          status: "completed",
-          jobId,
-          s3Url,
-          outputKey
-        });
+      // Extract output filename from MediaConvert settings
+      const outputGroup = job.Settings?.OutputGroups?.[0];
+      if (!outputGroup) {
+        console.error(`❌ No OutputGroup found in job settings`);
+        return res.status(200).json({ success: false, status: "failed", jobId, error: "No output group in settings" });
       }
+
+      const output = outputGroup.Outputs?.[0];
+      const destination = outputGroup.OutputGroupSettings?.FileGroupSettings?.Destination;
+      
+      if (!output || !destination) {
+        console.error(`❌ Missing output or destination in OutputGroup`);
+        return res.status(200).json({ success: false, status: "failed", jobId, error: "Missing output/destination" });
+      }
+
+      // Build the full S3 path: destination + nameModifier + .mp4
+      const nameModifier = output.NameModifier || "";
+      const container = output.ContainerSettings?.Container || "MP4";
+      const fileExtension = container === "MP4" ? ".mp4" : ".mov";
+      const outputKey = nameModifier + fileExtension;
+      const outputPath = destination.endsWith("/") ? destination + outputKey : destination + "/" + outputKey;
+      
+      console.log(`   Destination: ${destination}`);
+      console.log(`   NameModifier: ${nameModifier}`);
+      console.log(`   Full output path: ${outputPath}`);
+      console.log(`   Output key (for S3): ${outputKey}`);
+      
+      // Get signed URL for Frame.io
+      const signedUrl = await getSignedS3Url(outputKey);
+      console.log(`✅ Generated signed S3 URL for Frame.io`);
+      
+      // Update job in database with AWS S3 URL
+      await updateCoconutJob(jobId, "completed", outputPath);
+      
+      // Upload to Frame.io using signed URL
+      uploadToFrameIO(signedUrl, outputKey)
+        .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
+      
+      return res.status(200).json({ 
+        success: true, 
+        status: "completed",
+        jobId,
+        s3Url: outputPath,
+        outputKey
+      });
     } else if (job.Status === "FAILED" || job.Status === "CANCELED") {
       console.error(`❌ Job failed with status: ${job.Status}`);
       const error = job.ErrorMessage || "Unknown error";
