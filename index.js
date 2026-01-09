@@ -10,16 +10,26 @@ import path from "path";
 import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
-import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
-// Wasabi S3 client
+// Wasabi S3 client (for final output storage)
 const s3Client = new S3Client({
   endpoint: "https://s3.eu-central-1.wasabisys.com",
   region: "eu-central-1",
   credentials: {
     accessKeyId: "BVH9EMMKPXKS8W50LDV2",
     secretAccessKey: "daRvOFjpbeJ9DHKlzJ4RQOBA5AdNjpOXkuksA9pM"
+  }
+});
+
+// AWS S3 client (for MediaConvert staging - can read AWS S3 directly)
+const awsS3Client = new S3Client({
+  region: AWS_REGION,
+  credentials: {
+    accessKeyId: AWS_ACCESS_KEY_ID,
+    secretAccessKey: AWS_SECRET_ACCESS_KEY
   }
 });
 
@@ -259,7 +269,7 @@ async function getFilemailFiles(transferId) {
   }
 
   const data = await res.json();
-  console.log("Filemail transfer data:", JSON.stringify(data, null, 2));
+  console.log(`✅ Filemail API response: ${data.data.files.length} files found`);
 
   return data.data.files;
 }
@@ -281,7 +291,6 @@ async function processFilemailTransfer(transferId) {
     console.log(`📡 Using transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
     console.log("Fetching Filemail files...");
     const files = await getFilemailFiles(transferId);
-    console.log("Found files:", files);
 
     // Filter to video files only
     const videoFiles = files.filter(f => isVideoFile(f.filename));
@@ -314,7 +323,8 @@ async function processFilemailTransfer(transferId) {
       try {
         let result;
         
-      // Try MediaConvert first
+        // Try MediaConvert first if available
+        if (mediaConvertClient) {
           console.log(`🚀 Submitting to AWS MediaConvert (LUT + timecode in one job)`);
           try {
             console.log(`   Attempting MediaConvert submission...`);
@@ -426,7 +436,7 @@ async function stageFileToS3(downloadUrl, filename) {
 
 async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath) {
   try {
-    console.log(`📥 Staging to S3: ${filename}`);
+    console.log(`📥 Staging to AWS S3 (for MediaConvert): ${filename}`);
     console.log(`   Temp path: ${tempLocalPath}`);
     console.log(`   S3 key: ${stagingKey}`);
     
@@ -435,12 +445,21 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
     await downloadFile(downloadUrl, tempLocalPath);
     console.log(`   ✅ Downloaded to temp file`);
     
-    // Upload to S3 staging area
-    console.log(`   Uploading to Wasabi S3...`);
-    await uploadToWasabi(tempLocalPath, stagingKey);
-    console.log(`   ✅ Uploaded to S3`);
+    // Upload to AWS S3 staging area (MediaConvert can access AWS S3)
+    console.log(`   Uploading to AWS S3...`);
+    const fileStream = fs.createReadStream(tempLocalPath);
     
-    const s3Url = `s3://strawberries/${stagingKey}`;
+    const putCommand = new PutObjectCommand({
+      Bucket: "postready-staging",  // AWS S3 bucket for MediaConvert input
+      Key: stagingKey,
+      Body: fileStream,
+      ContentType: "video/mxf"
+    });
+    
+    await awsS3Client.send(putCommand);
+    console.log(`   ✅ Uploaded to AWS S3`);
+    
+    const s3Url = `s3://postready-staging/${stagingKey}`;
     console.log(`✅ File staged at: ${s3Url}`);
     
     return { s3Url, stagingKey, tempLocalPath };
@@ -453,20 +472,20 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
 }
 
 /**
- * Clean up S3 staging file after MediaConvert processing is complete
+ * Clean up AWS S3 staging file after MediaConvert processing is complete
  */
 async function cleanupS3Staging(stagingKey) {
   if (!stagingKey) return;
   
   try {
-    console.log(`🗑️  Cleaning up S3 staging: ${stagingKey}`);
+    console.log(`🗑️  Cleaning up AWS S3 staging: ${stagingKey}`);
     
     const deleteCommand = new DeleteObjectCommand({
-      Bucket: "strawberries",
+      Bucket: "postready-staging",
       Key: stagingKey
     });
     
-    await s3Client.send(deleteCommand);
+    await awsS3Client.send(deleteCommand);
     console.log(`✅ Staging file removed: ${stagingKey}`);
   } catch (err) {
     console.warn(`⚠️  Failed to clean up staging file ${stagingKey}: ${err.message}`);
@@ -1363,38 +1382,6 @@ app.get("/inbox", async (req, res) => {
 });
 
 /**
- * Preview endpoint - show what will be processed without actually processing
- */
-app.get("/preview/transfer/:transferId", async (req, res) => {
-  try {
-    const { transferId } = req.params;
-    console.log(`Preview request for transfer: ${transferId}`);
-    
-    const files = await getFilemailFiles(transferId);
-    const videoFiles = files.filter(f => isVideoFile(f.filename));
-    const nonVideoFiles = files.filter(f => !isVideoFile(f.filename));
-    
-    res.json({
-      transferId,
-      summary: {
-        totalFiles: files.length,
-        videoFiles: videoFiles.length,
-        nonVideoFiles: nonVideoFiles.length
-      },
-      videos: videoFiles.map(f => ({
-        filename: f.filename,
-        downloadurl: f.downloadurl,
-        size: f.filesize
-      })),
-      skipped: nonVideoFiles.map(f => f.filename)
-    });
-  } catch (err) {
-    console.error("Preview error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
  * Manual sync endpoint - upload completed jobs from Wasabi to Frame.io
  */
 app.post("/sync/wasabi-frameio", async (req, res) => {
@@ -1866,6 +1853,7 @@ app.post("/webhooks/coconut", async (req, res) => {
             console.error(`❌ Post-processing failed:`, err.message);
           });
       }
+    }
     
     // Return 200 success immediately
     res.status(200).json({ success: true, jobId, status });
