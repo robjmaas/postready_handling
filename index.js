@@ -14,28 +14,6 @@ import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } fro
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
-// Wasabi S3 client (for final output storage)
-const s3Client = new S3Client({
-  endpoint: "https://s3.eu-central-1.wasabisys.com",
-  region: "eu-central-1",
-  credentials: {
-    accessKeyId: "BVH9EMMKPXKS8W50LDV2",
-    secretAccessKey: "daRvOFjpbeJ9DHKlzJ4RQOBA5AdNjpOXkuksA9pM"
-  }
-});
-
-// AWS S3 client (for MediaConvert staging - can read AWS S3 directly)
-const awsS3Client = new S3Client({
-  region: AWS_REGION,
-  credentials: {
-    accessKeyId: AWS_ACCESS_KEY_ID,
-    secretAccessKey: AWS_SECRET_ACCESS_KEY
-  }
-});
-
-// Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
-let frameIODailiesFolderId = null;
-
 dotenv.config({ quiet: true });   // <— no output
 
 // Create luts directory if it doesn't exist
@@ -61,6 +39,28 @@ const AWS_REGION = process.env.AWS_REGION || "us-east-1";
 const AWS_MEDIACONVERT_ROLE = process.env.AWS_MEDIACONVERT_ROLE || "";  // IAM role ARN for MediaConvert
 const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
 const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
+
+// Wasabi S3 client (for final output storage)
+const s3Client = new S3Client({
+  endpoint: "https://s3.eu-central-1.wasabisys.com",
+  region: "eu-central-1",
+  credentials: {
+    accessKeyId: "BVH9EMMKPXKS8W50LDV2",
+    secretAccessKey: "daRvOFjpbeJ9DHKlzJ4RQOBA5AdNjpOXkuksA9pM"
+  }
+});
+
+// AWS S3 client (for MediaConvert staging - can read AWS S3 directly)
+const awsS3Client = new S3Client({
+  region: AWS_REGION,
+  credentials: {
+    accessKeyId: AWS_ACCESS_KEY_ID,
+    secretAccessKey: AWS_SECRET_ACCESS_KEY
+  }
+});
+
+// Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
+let frameIODailiesFolderId = null;
 
 // MediaConvert client (initialized if credentials available)
 let mediaConvertClient = null;
