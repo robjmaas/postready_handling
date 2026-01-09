@@ -455,12 +455,12 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
     console.log(`📥 Staging to AWS S3 (for MediaConvert): ${filename}`);
     console.log(`   S3 key: ${stagingKey}`);
     
-    // Download from Filemail to temp file with aggressive timeout (10 min max)
-    console.log(`   Downloading from Filemail with 10-minute timeout...`);
+    // Download from Filemail to temp file (60 min timeout for large files)
+    console.log(`   Downloading from Filemail (timeout: 60 minutes)...`);
     const startTime = Date.now();
-    await downloadFileWithTimeout(downloadUrl, tempLocalPath, 10 * 60 * 1000);
+    await downloadFileWithTimeout(downloadUrl, tempLocalPath, 60 * 60 * 1000);
     const dlTime = (Date.now() - startTime) / 1000;
-    console.log(`   ✅ Downloaded in ${dlTime.toFixed(1)}s`);
+    console.log(`   ✅ Downloaded in ${(dlTime / 60).toFixed(1)} minutes`);
     
     // Upload to AWS S3 staging area
     console.log(`   Uploading to AWS S3...`);
@@ -727,8 +727,17 @@ async function downloadFile(url, filepath) {
     
     let file = null;
     const protocol = url.startsWith('https') ? https : http;
+    let lastLogTime = Date.now();
+    let bytesReceived = 0;
+    
     let req = protocol.get(url, (response) => {
       file = fs.createWriteStream(filepath);
+      
+      // Log response details
+      const contentLength = response.headers['content-length'];
+      if (contentLength) {
+        console.log(`   📊 File size: ${(parseInt(contentLength) / 1024 / 1024 / 1024).toFixed(2)} GB`);
+      }
       
       // Clear timeout on successful response
       clearTimeout(timeout);
@@ -753,7 +762,17 @@ async function downloadFile(url, filepath) {
         return;
       }
       
-      response.on('data', () => {
+      response.on('data', (chunk) => {
+        bytesReceived += chunk.length;
+        const now = Date.now();
+        
+        // Log progress every 30 seconds
+        if (now - lastLogTime > 30 * 1000) {
+          const speedMbps = (bytesReceived / 1024 / 1024) / ((now - Date.now() + bytesReceived) / 1000);
+          console.log(`   📥 Downloaded: ${(bytesReceived / 1024 / 1024 / 1024).toFixed(2)} GB`);
+          lastLogTime = now;
+        }
+        
         // Reset timeout on each data chunk
         clearTimeout(newTimeout);
         timeout = setTimeout(() => {
