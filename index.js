@@ -10,7 +10,7 @@ import path from "path";
 import { execSync, spawnSync } from "child_process";
 import https from "https";
 import http from "http";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
 // Wasabi S3 client
@@ -88,6 +88,7 @@ async function initDb() {
       filename TEXT,
       status TEXT DEFAULT 'pending',
       output_url TEXT,
+      metadata TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       completed_at DATETIME,
       error TEXT,
@@ -100,6 +101,16 @@ async function initDb() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Add metadata column if it doesn't exist (for S3 staging key storage)
+  try {
+    await db.exec("ALTER TABLE coconut_jobs ADD COLUMN metadata TEXT;");
+    console.log("✅ Added metadata column to coconut_jobs table");
+  } catch (err) {
+    if (!err.message.includes("duplicate column")) {
+      console.warn(`⚠️  Migration warning: ${err.message}`);
+    }
+  }
 
   // Initialize default settings
   await db.run(
@@ -297,7 +308,7 @@ async function processFilemailTransfer(transferId) {
           try {
             result = await sendToMediaConvert(file.downloadurl, file.filename);
             // Store MediaConvert job in database (same table, just different service marker)
-            await storeMediaConvertJob(result.id, transferId, file.filename);
+            await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
             console.log("MediaConvert job stored:", result.id);
           } catch (mcErr) {
             console.warn(`⚠️  MediaConvert failed, falling back to Coconut: ${mcErr.message}`);
@@ -381,8 +392,59 @@ async function sendToCoconut(downloadUrl, filename) {
 }
 
 /**
+ * Stage video file to S3 for MediaConvert processing
+ * Downloads from Filemail and uploads to S3 to avoid SSL certificate issues
+ */
+async function stageFileToS3(downloadUrl, filename) {
+  const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
+  const stagingKey = `staging/${Date.now()}_${safeFilename}`;
+  const tempLocalPath = `/tmp/${stagingKey.split('/')[1]}`;
+  
+  try {
+    console.log(`📥 Staging to S3: ${filename}`);
+    
+    // Download from Filemail to temp file
+    await downloadFile(downloadUrl, tempLocalPath);
+    
+    // Upload to S3 staging area
+    await uploadToWasabi(tempLocalPath, stagingKey);
+    
+    const s3Url = `s3://strawberries/${stagingKey}`;
+    console.log(`✅ File staged at: ${s3Url}`);
+    
+    return { s3Url, stagingKey, tempLocalPath };
+    
+  } catch (err) {
+    console.error(`❌ S3 staging failed: ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * Clean up S3 staging file after MediaConvert processing is complete
+ */
+async function cleanupS3Staging(stagingKey) {
+  if (!stagingKey) return;
+  
+  try {
+    console.log(`🗑️  Cleaning up S3 staging: ${stagingKey}`);
+    
+    const deleteCommand = new DeleteObjectCommand({
+      Bucket: "strawberries",
+      Key: stagingKey
+    });
+    
+    await s3Client.send(deleteCommand);
+    console.log(`✅ Staging file removed: ${stagingKey}`);
+  } catch (err) {
+    console.warn(`⚠️  Failed to clean up staging file ${stagingKey}: ${err.message}`);
+    // Don't throw - cleanup failures shouldn't block processing
+  }
+}
+
+/**
  * Submit video to AWS MediaConvert for transcoding with LUT color grading
- * Single job: transcoding + LUT application + timecode preservation
+ * Stages file to S3 first to avoid SSL certificate issues with direct Filemail URLs
  */
 async function sendToMediaConvert(downloadUrl, filename) {
   if (!mediaConvertClient) {
@@ -390,9 +452,15 @@ async function sendToMediaConvert(downloadUrl, filename) {
   }
 
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  console.log("📡 Sending to AWS MediaConvert:", downloadUrl);
+  console.log("📡 Sending to AWS MediaConvert (via S3 staging):", filename);
+  
+  let stagingInfo = null;
   
   try {
+    // Stage file to S3 to avoid SSL certificate issues
+    stagingInfo = await stageFileToS3(downloadUrl, filename);
+    const fileInput = stagingInfo.s3Url;
+    
     // Get LUT URL for color grading
     const lutUrl = await getLutUrl();
     const hasLut = lutUrl && lutUrl.length > 0;
@@ -470,7 +538,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
             Rotate: "AUTO"
           },
           TimecodeSource: "EMBEDDED",  // Use timecode from source video
-          FileInput: downloadUrl,
+          FileInput: fileInput,
           // Apply LUT if available
           ...(hasLut && {
             FilterEnable: "AUTO",
@@ -493,6 +561,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
       UserMetadata: {
         service: "mediaconvert",
         filename: safeFilename,
+        stagingKey: stagingInfo.stagingKey,
         hasLut: hasLut.toString()
       }
     };
@@ -510,14 +579,33 @@ async function sendToMediaConvert(downloadUrl, filename) {
     console.log(`   Status: ${response.Job.Status}`);
     console.log(`   ${hasLut ? '🎨 LUT color grading enabled' : '⏭️  No LUT configured'}`);
     
+    // Clean up temp file
+    try {
+      if (stagingInfo.tempLocalPath && fs.existsSync(stagingInfo.tempLocalPath)) {
+        fs.unlinkSync(stagingInfo.tempLocalPath);
+        console.log(`🗑️  Cleaned up temp file`);
+      }
+    } catch (cleanupErr) {
+      console.warn(`⚠️  Temp file cleanup failed: ${cleanupErr.message}`);
+    }
+    
     return {
       id: response.Job.Id,
       status: response.Job.Status,
-      service: "mediaconvert"
+      service: "mediaconvert",
+      stagingKey: stagingInfo.stagingKey
     };
     
   } catch (err) {
     console.error(`❌ MediaConvert error: ${err.message}`);
+    // Clean up temp file if it exists
+    if (stagingInfo?.tempLocalPath && fs.existsSync(stagingInfo.tempLocalPath)) {
+      try {
+        fs.unlinkSync(stagingInfo.tempLocalPath);
+      } catch (cleanupErr) {
+        console.warn(`⚠️  Temp file cleanup failed: ${cleanupErr.message}`);
+      }
+    }
     throw err;
   }
 }
@@ -1000,12 +1088,12 @@ async function storeCoconutJob(jobId, transferId, filename) {
 /**
  * Store a new MediaConvert job in the database (uses same table)
  */
-async function storeMediaConvertJob(jobId, transferId, filename) {
+async function storeMediaConvertJob(jobId, transferId, filename, stagingKey = null) {
   // Mark as MediaConvert job by storing service info in filename comment
   const filenameWithService = `[MC] ${filename}`;
   await db.run(
-    "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
-    [jobId, transferId, filenameWithService, "pending"]
+    "INSERT INTO coconut_jobs (id, transfer_id, filename, status, metadata) VALUES (?, ?, ?, ?, ?)",
+    [jobId, transferId, filenameWithService, "pending", stagingKey ? JSON.stringify({ stagingKey }) : null]
   );
 }
 
@@ -1609,6 +1697,21 @@ app.post("/webhooks/coconut", async (req, res) => {
     await updateCoconutJob(jobId, status, outputUrl, error);
 
     console.log(`Job ${jobId} status updated to: ${status}`);
+    
+    // Clean up S3 staging files for MediaConvert jobs
+    if (status === "completed" || status === "failed") {
+      try {
+        const jobRow = await db.get("SELECT metadata FROM coconut_jobs WHERE id = ?", [jobId]);
+        if (jobRow?.metadata) {
+          const metadata = JSON.parse(jobRow.metadata);
+          if (metadata.stagingKey) {
+            await cleanupS3Staging(metadata.stagingKey);
+          }
+        }
+      } catch (cleanupErr) {
+        console.warn(`⚠️  Could not clean up staging file: ${cleanupErr.message}`);
+      }
+    }
     
     // If completed, run ffmpeg post-processing then upload to Frame.io
     if (status === "completed" && outputUrl) {
