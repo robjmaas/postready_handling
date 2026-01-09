@@ -1196,7 +1196,11 @@ app.post("/webhooks/coconut", async (req, res) => {
       // Try to extract MP4 URL from outputs array (new format)
       if (job?.outputs && Array.isArray(job.outputs)) {
         console.log(`Outputs array found with ${job.outputs.length} items:`, JSON.stringify(job.outputs, null, 2));
-        const mp4Output = job.outputs.find(o => o.format === "mp4" || o.key === "mp4");
+        // Look for any MP4 output (format may be "mp4" or "mp4:1080p" or similar)
+        const mp4Output = job.outputs.find(o => 
+          (o.format && o.format.toLowerCase().startsWith("mp4")) || 
+          (o.key && o.key.toLowerCase().startsWith("mp4"))
+        );
         if (mp4Output?.url) {
           outputUrl = mp4Output.url;
           console.log(`✅ Found MP4 output: ${outputUrl}`);
