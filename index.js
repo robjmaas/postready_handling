@@ -40,17 +40,7 @@ const AWS_MEDIACONVERT_ROLE = process.env.AWS_MEDIACONVERT_ROLE || "";  // IAM r
 const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
 const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
 
-// Wasabi S3 client (for final output storage)
-const s3Client = new S3Client({
-  endpoint: "https://s3.eu-central-1.wasabisys.com",
-  region: "eu-central-1",
-  credentials: {
-    accessKeyId: "BVH9EMMKPXKS8W50LDV2",
-    secretAccessKey: "daRvOFjpbeJ9DHKlzJ4RQOBA5AdNjpOXkuksA9pM"
-  }
-});
-
-// AWS S3 client (for MediaConvert staging - can read AWS S3 directly)
+// AWS S3 client (for MediaConvert staging and output)
 const awsS3Client = new S3Client({
   region: AWS_REGION,
   credentials: {
@@ -1910,21 +1900,20 @@ app.post("/webhooks/coconut", async (req, res) => {
         postProcessWithFFmpeg(outputUrl, outputUrl, filename)
           .then((processedUrl) => {
             console.log(`✅ Post-processing complete: ${processedUrl}`);
-            console.log(`📤 Video is ready in Wasabi: ${processedUrl}`);
+            console.log(`📤 Video is ready: ${processedUrl}`);
             
             // Try to upload to Frame.io after post-processing
-            // This is non-blocking - video is already safely stored in Wasabi
+            // This is non-blocking - video is already safely stored
             uploadToFrameIO(processedUrl, filename)
               .then((frameioResult) => {
                 if (frameioResult) {
                   console.log(`✅ Also uploaded to Frame.io: ${frameioResult.id}`);
                 } else {
-                  console.warn(`⚠️  Frame.io upload skipped or failed (video is safe in Wasabi)`);
+                  console.warn(`⚠️  Frame.io upload skipped or failed`);
                 }
               })
               .catch((err) => {
                 console.error(`⚠️  Frame.io upload failed (non-blocking): ${err.message}`);
-                console.log(`   Video is safely stored in Wasabi - Frame.io is optional`);
               });
           })
           .catch((err) => {
@@ -1975,23 +1964,25 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
       
       // Extract output URL from outputs array
       if (message.detail?.outputGroupDetails?.[0]?.outputDetails?.[0]?.outputFilePaths?.[0]) {
-        outputUrl = message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths[0];
-        console.log(`✅ Found output: ${outputUrl}`);
+        const outputPath = message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths[0];
+        console.log(`✅ Found output: ${outputPath}`);
         
-        // Copy from AWS S3 to Wasabi S3 (non-blocking)
-        const outputKey = outputUrl.replace("s3://postready-staging/outputs/", "");
-        copyToWasabi(outputKey)
-          .then((wasabiUrl) => {
-            console.log(`✅ Copied to Wasabi: ${wasabiUrl}`);
-            // Update job with Wasabi URL
-            updateCoconutJob(jobId, "completed", wasabiUrl);
-            // Try to upload to Frame.io
-            uploadToFrameIO(wasabiUrl, outputKey)
+        // Extract just the filename
+        const outputKey = outputPath.replace("s3://postready-staging/outputs/", "");
+        
+        // Get signed URL for Frame.io (non-blocking)
+        getSignedS3Url(outputKey)
+          .then((signedUrl) => {
+            console.log(`✅ Generated signed S3 URL for Frame.io`);
+            // Update job with AWS S3 URL
+            updateCoconutJob(jobId, "completed", outputPath);
+            // Upload to Frame.io
+            uploadToFrameIO(signedUrl, outputKey)
               .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
           })
           .catch(err => {
-            console.error(`❌ Failed to copy to Wasabi: ${err.message}`);
-            updateCoconutJob(jobId, "completed", outputUrl); // Keep AWS S3 URL as fallback
+            console.error(`❌ Failed to get signed URL: ${err.message}`);
+            updateCoconutJob(jobId, "completed", outputPath);
           });
       } else {
         console.error(`❌ No output file found in MediaConvert response`);
@@ -2021,32 +2012,91 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
 /**
  * Copy file from AWS S3 to Wasabi S3
  */
-async function copyToWasabi(outputKey) {
+/**
+ * Get signed URL for AWS S3 file (for Frame.io upload)
+ */
+async function getSignedS3Url(key) {
   try {
-    console.log(`📋 Copying ${outputKey} from AWS S3 to Wasabi...`);
-    
-    // Get object from AWS S3
-    const getCommand = new GetObjectCommand({
+    const command = new GetObjectCommand({
       Bucket: "postready-staging",
-      Key: `outputs/${outputKey}`
+      Key: `outputs/${key}`
     });
-    const response = await awsS3Client.send(getCommand);
-    
-    // Upload to Wasabi
-    const putCommand = new PutObjectCommand({
-      Bucket: "strawberries",
-      Key: outputKey,
-      Body: response.Body,
-      ContentType: "video/mp4"
-    });
-    
-    await wasabiS3Client.send(putCommand);
-    console.log(`✅ Copied to Wasabi: s3://strawberries/${outputKey}`);
-    
-    return `https://s3.eu-central-1.wasabisys.com/strawberries/${outputKey}`;
-    
+    const url = await getSignedUrl(awsS3Client, command, { expiresIn: 86400 * 7 }); // 7 days
+    return url;
   } catch (err) {
-    console.error(`❌ Failed to copy to Wasabi: ${err.message}`);
+    console.error(`Failed to create signed URL: ${err.message}`);
     throw err;
   }
 }
+
+/**
+ * Check MediaConvert job status and handle completion
+ */
+app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
+  try {
+    const jobId = req.params.jobId;
+    console.log(`🔍 Checking MediaConvert job status: ${jobId}`);
+    
+    // Get job status from AWS
+    const getJobCommand = new GetJobCommand({ Id: jobId });
+    const jobResponse = await mediaConvertClient.send(getJobCommand);
+    const job = jobResponse.Job;
+    
+    console.log(`Job status: ${job.Status}`);
+    
+    if (job.Status === "COMPLETE") {
+      console.log(`✅ Job complete! Extracting output...`);
+      
+      // Extract output file path
+      if (job.OutputGroupDetails?.[0]?.OutputDetails?.[0]?.OutputFilePaths?.[0]) {
+        const outputPath = job.OutputGroupDetails[0].OutputDetails[0].OutputFilePaths[0];
+        console.log(`Output: ${outputPath}`);
+        
+        // Extract just the filename from the S3 path
+        const outputKey = outputPath.split("/outputs/")[1];
+        console.log(`Output key: ${outputKey}`);
+        
+        // Get signed URL for Frame.io
+        const signedUrl = await getSignedS3Url(outputKey);
+        console.log(`✅ Generated signed S3 URL for Frame.io`);
+        
+        // Update job in database with AWS S3 URL
+        const s3Url = `s3://postready-staging/outputs/${outputKey}`;
+        await updateCoconutJob(jobId, "completed", s3Url);
+        
+        // Upload to Frame.io using signed URL
+        uploadToFrameIO(signedUrl, outputKey)
+          .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
+        
+        return res.status(200).json({ 
+          success: true, 
+          status: "completed",
+          jobId,
+          s3Url,
+          outputKey
+        });
+      }
+    } else if (job.Status === "FAILED" || job.Status === "CANCELED") {
+      console.error(`❌ Job failed with status: ${job.Status}`);
+      const error = job.ErrorMessage || "Unknown error";
+      await updateCoconutJob(jobId, "failed", null, error);
+      
+      return res.status(200).json({ 
+        success: false,
+        status: "failed",
+        jobId,
+        error
+      });
+    }
+    
+    return res.status(200).json({ 
+      success: true,
+      status: job.Status,
+      jobId
+    });
+    
+  } catch (err) {
+    console.error(`Error checking job: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
