@@ -402,12 +402,18 @@ async function stageFileToS3(downloadUrl, filename) {
   
   try {
     console.log(`📥 Staging to S3: ${filename}`);
+    console.log(`   Temp path: ${tempLocalPath}`);
+    console.log(`   S3 key: ${stagingKey}`);
     
     // Download from Filemail to temp file
+    console.log(`   Downloading from Filemail...`);
     await downloadFile(downloadUrl, tempLocalPath);
+    console.log(`   ✅ Downloaded to temp file`);
     
     // Upload to S3 staging area
+    console.log(`   Uploading to Wasabi S3...`);
     await uploadToWasabi(tempLocalPath, stagingKey);
+    console.log(`   ✅ Uploaded to S3`);
     
     const s3Url = `s3://strawberries/${stagingKey}`;
     console.log(`✅ File staged at: ${s3Url}`);
@@ -416,6 +422,7 @@ async function stageFileToS3(downloadUrl, filename) {
     
   } catch (err) {
     console.error(`❌ S3 staging failed: ${err.message}`);
+    console.error(`   Stack: ${err.stack}`);
     throw err;
   }
 }
@@ -851,24 +858,38 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
  * Upload a local file to Wasabi S3
  */
 async function uploadToWasabi(localFilePath, s3Key) {
-  console.log(`📤 Uploading to Wasabi: ${s3Key}`);
-  
-  // Use stream instead of readFileSync to avoid OOM on large files
-  const fileStream = fs.createReadStream(localFilePath);
-  
-  const command = new PutObjectCommand({
-    Bucket: "strawberries",
-    Key: s3Key,
-    Body: fileStream,
-    ContentType: "video/mp4"
-  });
-  
-  await s3Client.send(command);
-  
-  const wasabiUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${s3Key}`;
-  console.log(`✅ Uploaded to Wasabi: ${wasabiUrl}`);
-  
-  return wasabiUrl;
+  try {
+    console.log(`📤 Uploading to Wasabi: ${s3Key}`);
+    
+    // Check file exists and get size
+    if (!fs.existsSync(localFilePath)) {
+      throw new Error(`Local file not found: ${localFilePath}`);
+    }
+    const fileStats = fs.statSync(localFilePath);
+    console.log(`   File size: ${(fileStats.size / 1024 / 1024).toFixed(2)} MB`);
+    
+    // Use stream instead of readFileSync to avoid OOM on large files
+    const fileStream = fs.createReadStream(localFilePath);
+    
+    const command = new PutObjectCommand({
+      Bucket: "strawberries",
+      Key: s3Key,
+      Body: fileStream,
+      ContentType: "video/mp4"
+    });
+    
+    console.log(`   Sending to S3...`);
+    await s3Client.send(command);
+    console.log(`   ✅ S3 upload complete`);
+    
+    const wasabiUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${s3Key}`;
+    console.log(`✅ Uploaded to Wasabi: ${wasabiUrl}`);
+    
+    return wasabiUrl;
+  } catch (err) {
+    console.error(`❌ Wasabi upload failed: ${err.message}`);
+    throw err;
+  }
 }
 
 /* ==================== COCONUT WEBHOOK ==================== */
