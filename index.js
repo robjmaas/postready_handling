@@ -2046,6 +2046,12 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
     if (job.Status === "COMPLETE") {
       console.log(`✅ Job complete! Extracting output...`);
       
+      // Check for output errors
+      if (job.OutputGroupDetails?.length > 0) {
+        const outputDetails = job.OutputGroupDetails[0];
+        console.log(`Output details:`, JSON.stringify(outputDetails, null, 2));
+      }
+      
       // Extract output filename from MediaConvert settings
       const outputGroup = job.Settings?.OutputGroups?.[0];
       if (!outputGroup) {
