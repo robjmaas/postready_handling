@@ -81,7 +81,7 @@ if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaco
   console.error(`   AWS_MEDIACONVERT_ROLE: ${AWS_MEDIACONVERT_ROLE || '❌ MISSING'}`);
 }
 
-// Test AWS S3 bucket access on startup
+// Test AWS S3 bucket access on startup (optional - staging will try anyway)
 async function testS3BucketAccess() {
   try {
     const headBucketCommand = new HeadBucketCommand({
@@ -90,8 +90,9 @@ async function testS3BucketAccess() {
     await awsS3Client.send(headBucketCommand);
     console.log(`✅ AWS S3 bucket 'postready-staging' is accessible`);
   } catch (err) {
-    console.error(`❌ Cannot access AWS S3 bucket 'postready-staging': ${err.message}`);
-    console.error(`   This may cause MediaConvert staging to fail`);
+    // Don't fail startup - staging will attempt to create/use bucket anyway
+    console.warn(`⚠️  S3 bucket 'postready-staging' may not be accessible: ${err.message}`);
+    console.warn(`   MediaConvert staging may still work if AWS credentials are valid`);
   }
 }
 
@@ -538,17 +539,22 @@ async function sendToMediaConvert(downloadUrl, filename) {
   let stagingInfo = null;
   
   try {
-    // Use Filemail URL directly - no S3 staging needed (MediaConvert will fetch directly)
-    console.log(`\n[Step 1/2] Using Filemail URL directly (no S3 staging)`);
-    const fileInput = downloadUrl;
-    console.log(`Input for MediaConvert: ${fileInput.substring(0, 80)}...`);
+    // Stage file to S3 first (MediaConvert has SSL/TLS issues with Filemail URLs)
+    console.log(`\n[Step 1/3] Starting S3 staging...`);
+    stagingInfo = await stageFileToS3(downloadUrl, filename);
+    console.log(`✅ S3 staging complete`);
+    const fileInput = stagingInfo.s3Url;
+    console.log(`Input for MediaConvert: ${fileInput}`);
     
     // Get LUT URL for color grading
-    console.log(`\n[Step 2/2] Checking LUT configuration...`);
+    console.log(`\n[Step 2/3] Checking LUT configuration...`);
     const lutUrl = await getLutUrl();
     const hasLut = lutUrl && lutUrl.length > 0;
     console.log(`LUT configured: ${hasLut}`);
     if (hasLut) console.log(`LUT URL: ${lutUrl.substring(0, 50)}...`);
+    
+    // Build MediaConvert job
+    console.log(`\n[Step 3/3] Building MediaConvert job...`);
     const jobSettings = {
       OutputGroups: [
         {
@@ -669,10 +675,18 @@ async function sendToMediaConvert(downloadUrl, filename) {
       id: response.Job.Id,
       status: response.Job.Status,
       service: "mediaconvert",
-      stagingKey: null
+      stagingKey: stagingInfo?.stagingKey
     };
     
   } catch (err) {
+    // Clean up staging file on error
+    if (stagingInfo?.stagingKey) {
+      try {
+        await cleanupS3Staging(stagingInfo.stagingKey);
+      } catch (cleanupErr) {
+        console.warn(`Failed to cleanup staging: ${cleanupErr.message}`);
+      }
+    }
     console.error(`\n${'='.repeat(60)}`);
     console.error(`❌ MEDIACONVERT FAILED`);
     console.error(`${'='.repeat(60)}`);
