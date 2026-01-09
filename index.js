@@ -439,26 +439,16 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
     console.log(`📥 Staging to AWS S3 (for MediaConvert): ${filename}`);
     console.log(`   S3 key: ${stagingKey}`);
     
-    // Stream directly from Filemail to AWS S3 (skip local disk to save time)
-    console.log(`   Streaming from Filemail directly to AWS S3...`);
-    const protocol = downloadUrl.startsWith('https') ? https : http;
+    // Download from Filemail to temp file with aggressive timeout (10 min max)
+    console.log(`   Downloading from Filemail with 10-minute timeout...`);
+    const startTime = Date.now();
+    await downloadFileWithTimeout(downloadUrl, tempLocalPath, 10 * 60 * 1000);
+    const dlTime = (Date.now() - startTime) / 1000;
+    console.log(`   ✅ Downloaded in ${dlTime.toFixed(1)}s`);
     
-    const fileStream = await new Promise((resolve, reject) => {
-      const req = protocol.get(downloadUrl, (response) => {
-        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-          // Follow redirect
-          req.abort();
-          resolve(new Promise((res, rej) => {
-            const proto = response.headers.location.startsWith('https') ? https : http;
-            proto.get(response.headers.location, (r) => res(r)).on('error', rej);
-          }));
-        } else if (response.statusCode !== 200) {
-          reject(new Error(`Filemail download failed: ${response.statusCode}`));
-        } else {
-          resolve(response);
-        }
-      }).on('error', reject);
-    });
+    // Upload to AWS S3 staging area
+    console.log(`   Uploading to AWS S3...`);
+    const fileStream = fs.createReadStream(tempLocalPath);
     
     const putCommand = new PutObjectCommand({
       Bucket: "postready-staging",
@@ -467,9 +457,15 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
       ContentType: "video/mxf"
     });
     
-    console.log(`   Uploading to AWS S3...`);
     await awsS3Client.send(putCommand);
     console.log(`   ✅ Uploaded to AWS S3`);
+    
+    // Clean up temp file
+    try {
+      fs.unlinkSync(tempLocalPath);
+    } catch (e) {
+      // Ignore cleanup errors
+    }
     
     const s3Url = `s3://postready-staging/${stagingKey}`;
     console.log(`✅ File staged at: ${s3Url}`);
@@ -718,19 +714,24 @@ async function getLutUrl() {
 async function downloadFile(url, filepath) {
   return new Promise((resolve, reject) => {
     const timeoutMs = 30 * 60 * 1000; // 30 minute timeout for large files
-    const timeout = setTimeout(() => {
+    let timeout = setTimeout(() => {
+      file?.close?.();
       fs.unlink(filepath, () => {});
+      req?.abort?.();
       reject(new Error(`Download timeout after ${timeoutMs / 1000 / 60} minutes: ${url}`));
     }, timeoutMs);
     
-    const file = fs.createWriteStream(filepath);
+    let file = null;
     const protocol = url.startsWith('https') ? https : http;
-    const req = protocol.get(url, (response) => {
+    let req = protocol.get(url, (response) => {
+      file = fs.createWriteStream(filepath);
+      
       // Clear timeout on successful response
       clearTimeout(timeout);
       const newTimeout = setTimeout(() => {
         file.close();
         fs.unlink(filepath, () => {});
+        req?.abort?.();
         reject(new Error(`Download stalled for 30 minutes: ${url}`));
       }, timeoutMs);
       
@@ -741,30 +742,52 @@ async function downloadFile(url, filepath) {
         return downloadFile(response.headers.location, filepath).then(resolve).catch(reject);
       }
       
+      if (response.statusCode !== 200) {
+        file.close();
+        clearTimeout(newTimeout);
+        reject(new Error(`HTTP ${response.statusCode}: ${url}`));
+        return;
+      }
+      
       response.on('data', () => {
         // Reset timeout on each data chunk
         clearTimeout(newTimeout);
-        setTimeout(() => {
+        timeout = setTimeout(() => {
           file.close();
           fs.unlink(filepath, () => {});
+          req?.abort?.();
           reject(new Error(`Download stalled (no data for 30 minutes): ${url}`));
         }, timeoutMs);
       });
       
       response.pipe(file);
       file.on('finish', () => {
+        clearTimeout(timeout);
         clearTimeout(newTimeout);
         file.close();
         resolve();
       });
     }).on('error', (err) => {
       clearTimeout(timeout);
+      file?.close?.();
       fs.unlink(filepath, () => {});
       reject(err);
     });
     
     req.setTimeout(timeoutMs);
   });
+}
+
+/**
+ * Download file with explicit timeout enforcement
+ */
+async function downloadFileWithTimeout(url, filepath, timeoutMs) {
+  return Promise.race([
+    downloadFile(url, filepath),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Download timeout after ${timeoutMs / 1000 / 60} minutes`)), timeoutMs)
+    )
+  ]);
 }
 
 /**
