@@ -7,7 +7,7 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import fs from "fs";
 import path from "path";
-import { execSync, spawnSync } from "child_process";
+import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -717,8 +717,9 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       throw new Error(`Failed to download LUT: ${lutResponse.status}`);
     }
     
-    const lutBuffer = await lutResponse.buffer();
-    fs.writeFileSync(lutFilePath, lutBuffer);
+    const lutBuffer = await lutResponse.arrayBuffer();
+    const lutUint8Array = new Uint8Array(lutBuffer);
+    fs.writeFileSync(lutFilePath, lutUint8Array);
     
     // Verify file was written and is accessible
     if (!fs.existsSync(lutFilePath)) {
@@ -732,29 +733,12 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     console.log(`   ✅ LUT downloaded (${lutBuffer.length} bytes) and verified at ${lutFilePath}`);
     
-    // Step 2: Extract timecode from source video
+    // Step 2: Extract timecode from source video (non-blocking)
     console.log(`   Step 2: Extracting timecode from source video...`);
     let timecodeArg = '';
     
-    try {
-      // Try to get timecode from the source video metadata
-      const ffprobeResult = spawnSync('ffprobe', [
-        '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'frame=pkt_duration_time',
-        '-of', 'default=noprint_wrappers=1:nokey=1:nokey=0',
-        sourceVideoUrl || inputMp4Url  // Try source first, fall back to input
-      ]);
-      
-      if (ffprobeResult.status === 0) {
-        const duration = ffprobeResult.stdout.toString().split('\n')[0]?.trim();
-        if (duration && !isNaN(parseFloat(duration))) {
-          console.log(`   ✅ Got frame duration info from source`);
-        }
-      }
-    } catch (err) {
-      console.warn(`   ⚠️  Could not extract timecode info: ${err.message}`);
-    }
+    // Skip timecode extraction to avoid blocking - FFmpeg will handle defaults
+    console.log(`   ⏭️  Using default timecode (00:00:00:00)`);
     
     // Step 3: Prepare output path
     const outputBase = path.basename(filename, path.extname(filename));
@@ -788,21 +772,34 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     const ffmpegPromise = new Promise((resolve, reject) => {
       console.log(`   Running FFmpeg with LUT: ${lutFilePath}`);
-      const ffmpeg = spawnSync('ffmpeg', ffmpegArgs, {
-        stdio: ['pipe', 'pipe', 'pipe']
+      const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+      
+      let stderrData = '';
+      let stdoutData = '';
+      
+      ffmpeg.stderr.on('data', (data) => {
+        stderrData += data.toString();
       });
       
-      if (ffmpeg.status !== 0) {
-        const stderr = ffmpeg.stderr.toString();
-        const stdout = ffmpeg.stdout.toString();
-        console.error(`   ❌ FFmpeg exit code: ${ffmpeg.status}`);
-        console.error(`   FFmpeg stderr:\n${stderr}`);
-        if (stdout) console.error(`   FFmpeg stdout:\n${stdout}`);
-        reject(new Error(`FFmpeg failed with code ${ffmpeg.status}: ${stderr}`));
-      } else {
-        console.log(`   ✅ FFmpeg processing completed`);
-        resolve();
-      }
+      ffmpeg.stdout.on('data', (data) => {
+        stdoutData += data.toString();
+      });
+      
+      ffmpeg.on('close', (code) => {
+        if (code !== 0) {
+          console.error(`   ❌ FFmpeg exit code: ${code}`);
+          console.error(`   FFmpeg stderr:\n${stderrData}`);
+          if (stdoutData) console.error(`   FFmpeg stdout:\n${stdoutData}`);
+          reject(new Error(`FFmpeg failed with code ${code}: ${stderrData}`));
+        } else {
+          console.log(`   ✅ FFmpeg processing completed`);
+          resolve();
+        }
+      });
+      
+      ffmpeg.on('error', (err) => {
+        reject(new Error(`Failed to start FFmpeg: ${err.message}`));
+      });
     });
 
     
