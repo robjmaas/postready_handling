@@ -10,7 +10,7 @@ import path from "path";
 import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
@@ -2070,6 +2070,25 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
       console.log(`   NameModifier: ${nameModifier}`);
       console.log(`   Full output path: ${outputPath}`);
       console.log(`   Output key (for S3): ${outputKey}`);
+      
+      // Verify file exists in S3 before generating signed URL
+      try {
+        const headCommand = new HeadBucketCommand({ Bucket: "postready-staging" });
+        await awsS3Client.send(headCommand);
+        
+        // Check if the output file exists
+        const headObject = await awsS3Client.send(new HeadObjectCommand({
+          Bucket: "postready-staging",
+          Key: `outputs/${outputKey}`
+        }));
+        console.log(`   ✅ File exists in S3: outputs/${outputKey}`);
+        console.log(`   File size: ${(headObject.ContentLength / 1024 / 1024).toFixed(2)} MB`);
+      } catch (err) {
+        console.error(`❌ File NOT found in S3: outputs/${outputKey}`);
+        console.error(`   Error: ${err.message}`);
+        console.error(`   MediaConvert may not have written the file yet`);
+        return res.status(200).json({ success: false, status: "processing", jobId, error: "Output file not yet available in S3" });
+      }
       
       // Get signed URL for Frame.io
       const signedUrl = await getSignedS3Url(outputKey);
