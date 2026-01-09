@@ -418,18 +418,18 @@ async function sendToCoconut(downloadUrl, filename) {
 
 /**
  * Stage video file to S3 for MediaConvert processing
- * Downloads from Filemail and uploads to S3 to avoid SSL certificate issues
+ * Streams directly from Filemail to AWS S3 (no local disk staging)
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
   const stagingKey = `staging/${Date.now()}_${safeFilename}`;
   const tempLocalPath = `/tmp/${stagingKey.split('/')[1]}`;
   
-  // Wrap in timeout - 45 minutes max for very large files
+  // Wrap in timeout - 60 minutes max for very large files (direct streaming)
   return Promise.race([
     stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath),
     new Promise((_, reject) => 
-      setTimeout(() => reject(new Error("S3 staging timeout after 45 minutes")), 45 * 60 * 1000)
+      setTimeout(() => reject(new Error("S3 staging timeout after 60 minutes")), 60 * 60 * 1000)
     )
   ]);
 }
@@ -437,25 +437,37 @@ async function stageFileToS3(downloadUrl, filename) {
 async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath) {
   try {
     console.log(`📥 Staging to AWS S3 (for MediaConvert): ${filename}`);
-    console.log(`   Temp path: ${tempLocalPath}`);
     console.log(`   S3 key: ${stagingKey}`);
     
-    // Download from Filemail to temp file
-    console.log(`   Downloading from Filemail...`);
-    await downloadFile(downloadUrl, tempLocalPath);
-    console.log(`   ✅ Downloaded to temp file`);
+    // Stream directly from Filemail to AWS S3 (skip local disk to save time)
+    console.log(`   Streaming from Filemail directly to AWS S3...`);
+    const protocol = downloadUrl.startsWith('https') ? https : http;
     
-    // Upload to AWS S3 staging area (MediaConvert can access AWS S3)
-    console.log(`   Uploading to AWS S3...`);
-    const fileStream = fs.createReadStream(tempLocalPath);
+    const fileStream = await new Promise((resolve, reject) => {
+      const req = protocol.get(downloadUrl, (response) => {
+        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+          // Follow redirect
+          req.abort();
+          resolve(new Promise((res, rej) => {
+            const proto = response.headers.location.startsWith('https') ? https : http;
+            proto.get(response.headers.location, (r) => res(r)).on('error', rej);
+          }));
+        } else if (response.statusCode !== 200) {
+          reject(new Error(`Filemail download failed: ${response.statusCode}`));
+        } else {
+          resolve(response);
+        }
+      }).on('error', reject);
+    });
     
     const putCommand = new PutObjectCommand({
-      Bucket: "postready-staging",  // AWS S3 bucket for MediaConvert input
+      Bucket: "postready-staging",
       Key: stagingKey,
       Body: fileStream,
       ContentType: "video/mxf"
     });
     
+    console.log(`   Uploading to AWS S3...`);
     await awsS3Client.send(putCommand);
     console.log(`   ✅ Uploaded to AWS S3`);
     
@@ -466,7 +478,6 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
     
   } catch (err) {
     console.error(`❌ S3 staging failed: ${err.message}`);
-    console.error(`   Stack: ${err.stack}`);
     throw err;
   }
 }
