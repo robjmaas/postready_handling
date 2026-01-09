@@ -538,22 +538,17 @@ async function sendToMediaConvert(downloadUrl, filename) {
   let stagingInfo = null;
   
   try {
-    // Stage file to S3 to avoid SSL certificate issues
-    console.log(`\n[Step 1/3] Starting S3 staging...`);
-    stagingInfo = await stageFileToS3(downloadUrl, filename);
-    console.log(`✅ S3 staging complete`);
-    const fileInput = stagingInfo.s3Url;
-    console.log(`Input for MediaConvert: ${fileInput}`);
+    // Use Filemail URL directly - no S3 staging needed (MediaConvert will fetch directly)
+    console.log(`\n[Step 1/2] Using Filemail URL directly (no S3 staging)`);
+    const fileInput = downloadUrl;
+    console.log(`Input for MediaConvert: ${fileInput.substring(0, 80)}...`);
     
     // Get LUT URL for color grading
-    console.log(`\n[Step 2/3] Checking LUT configuration...`);
+    console.log(`\n[Step 2/2] Checking LUT configuration...`);
     const lutUrl = await getLutUrl();
     const hasLut = lutUrl && lutUrl.length > 0;
     console.log(`LUT configured: ${hasLut}`);
     if (hasLut) console.log(`LUT URL: ${lutUrl.substring(0, 50)}...`);
-    
-    // Build MediaConvert job
-    console.log(`\n[Step 3/3] Building MediaConvert job...`);
     const jobSettings = {
       OutputGroups: [
         {
@@ -671,21 +666,11 @@ async function sendToMediaConvert(downloadUrl, filename) {
     console.log(`   ${hasLut ? '🎨 LUT color grading enabled' : '⏭️  No LUT configured'}`);
     console.log(`${'='.repeat(60)}\n`);
     
-    // Clean up temp file
-    try {
-      if (stagingInfo.tempLocalPath && fs.existsSync(stagingInfo.tempLocalPath)) {
-        fs.unlinkSync(stagingInfo.tempLocalPath);
-        console.log(`🗑️  Cleaned up temp file`);
-      }
-    } catch (cleanupErr) {
-      console.warn(`⚠️  Temp file cleanup failed: ${cleanupErr.message}`);
-    }
-    
     return {
       id: response.Job.Id,
       status: response.Job.Status,
       service: "mediaconvert",
-      stagingKey: stagingInfo.stagingKey
+      stagingKey: null
     };
     
   } catch (err) {
@@ -696,13 +681,6 @@ async function sendToMediaConvert(downloadUrl, filename) {
     console.error(`Error type: ${err.name}`);
     console.error(`Stack: ${err.stack}`);
     console.error(`${'='.repeat(60)}\n`);
-    
-    // Clean up temp file if it exists
-    if (stagingInfo?.tempLocalPath && fs.existsSync(stagingInfo.tempLocalPath)) {
-      try {
-        fs.unlinkSync(stagingInfo.tempLocalPath);
-      } catch (cleanupErr) {
-        console.warn(`⚠️  Temp file cleanup failed: ${cleanupErr.message}`);
       }
     }
     throw err;
