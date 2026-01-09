@@ -998,18 +998,6 @@ async function storeCoconutJob(jobId, transferId, filename) {
 }
 
 /**
- * Store a new MediaConvert job in the database (uses same table)
- */
-async function storeMediaConvertJob(jobId, transferId, filename) {
-  // Mark as MediaConvert job by storing service info in filename comment
-  const filenameWithService = `[MC] ${filename}`;
-  await db.run(
-    "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
-    [jobId, transferId, filenameWithService, "pending"]
-  );
-}
-
-/**
  * Update Coconut job status
  */
 async function updateCoconutJob(jobId, status, outputUrl = null, error = null) {
