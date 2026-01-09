@@ -400,6 +400,16 @@ async function stageFileToS3(downloadUrl, filename) {
   const stagingKey = `staging/${Date.now()}_${safeFilename}`;
   const tempLocalPath = `/tmp/${stagingKey.split('/')[1]}`;
   
+  // Wrap in timeout - 45 minutes max for very large files
+  return Promise.race([
+    stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error("S3 staging timeout after 45 minutes")), 45 * 60 * 1000)
+    )
+  ]);
+}
+
+async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPath) {
   try {
     console.log(`📥 Staging to S3: ${filename}`);
     console.log(`   Temp path: ${tempLocalPath}`);
@@ -632,27 +642,57 @@ async function getLutUrl() {
 }
 
 /**
- * Download a file from URL to local filesystem
+ * Download a file from URL to local filesystem with timeout protection
  */
 async function downloadFile(url, filepath) {
   return new Promise((resolve, reject) => {
+    const timeoutMs = 30 * 60 * 1000; // 30 minute timeout for large files
+    const timeout = setTimeout(() => {
+      fs.unlink(filepath, () => {});
+      reject(new Error(`Download timeout after ${timeoutMs / 1000 / 60} minutes: ${url}`));
+    }, timeoutMs);
+    
     const file = fs.createWriteStream(filepath);
     const protocol = url.startsWith('https') ? https : http;
-    protocol.get(url, (response) => {
+    const req = protocol.get(url, (response) => {
+      // Clear timeout on successful response
+      clearTimeout(timeout);
+      const newTimeout = setTimeout(() => {
+        file.close();
+        fs.unlink(filepath, () => {});
+        reject(new Error(`Download stalled for 30 minutes: ${url}`));
+      }, timeoutMs);
+      
       // Handle redirects
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         file.close();
+        clearTimeout(newTimeout);
         return downloadFile(response.headers.location, filepath).then(resolve).catch(reject);
       }
+      
+      response.on('data', () => {
+        // Reset timeout on each data chunk
+        clearTimeout(newTimeout);
+        setTimeout(() => {
+          file.close();
+          fs.unlink(filepath, () => {});
+          reject(new Error(`Download stalled (no data for 30 minutes): ${url}`));
+        }, timeoutMs);
+      });
+      
       response.pipe(file);
       file.on('finish', () => {
+        clearTimeout(newTimeout);
         file.close();
         resolve();
       });
     }).on('error', (err) => {
-      fs.unlink(filepath, () => {}); // Delete file on error
+      clearTimeout(timeout);
+      fs.unlink(filepath, () => {});
       reject(err);
     });
+    
+    req.setTimeout(timeoutMs);
   });
 }
 
