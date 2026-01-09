@@ -442,12 +442,6 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     // (Old code left below for reference when re-enabling)
   }
 }
-      if (fs.existsSync(processedMp4)) fs.unlinkSync(processedMp4);
-    } catch (err) {
-      console.warn(`Warning: Could not clean up temp files: ${err.message}`);
-    }
-  }
-}
 
 /**
  * Upload a local file to Wasabi S3
