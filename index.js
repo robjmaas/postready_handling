@@ -430,8 +430,8 @@ async function sendToCoconut(downloadUrl, filename) {
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  // Use hash of timestamp + filename to avoid MediaConvert appending input filename to output
-  const stagingId = Buffer.from(Date.now() + Math.random()).toString('hex').substring(0, 8);
+  // Use simple random ID to avoid MediaConvert appending input filename to output
+  const stagingId = Math.random().toString(36).substring(2, 10);
   const stagingKey = `staging/tmp_${stagingId}`;
   
   return new Promise((resolve, reject) => {
