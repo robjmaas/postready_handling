@@ -644,7 +644,6 @@ async function sendToMediaConvert(downloadUrl, filename) {
       UserMetadata: {
         service: "mediaconvert",
         filename: safeFilename,
-        stagingKey: stagingInfo.stagingKey,
         hasLut: hasLut.toString()
       }
     };
@@ -681,8 +680,6 @@ async function sendToMediaConvert(downloadUrl, filename) {
     console.error(`Error type: ${err.name}`);
     console.error(`Stack: ${err.stack}`);
     console.error(`${'='.repeat(60)}\n`);
-      }
-    }
     throw err;
   }
 }
