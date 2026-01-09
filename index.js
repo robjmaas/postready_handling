@@ -1195,6 +1195,7 @@ app.post("/webhooks/coconut", async (req, res) => {
       
       // Try to extract MP4 URL from outputs array (new format)
       if (job?.outputs && Array.isArray(job.outputs)) {
+        console.log(`Outputs array found with ${job.outputs.length} items:`, JSON.stringify(job.outputs, null, 2));
         const mp4Output = job.outputs.find(o => o.format === "mp4" || o.key === "mp4");
         if (mp4Output?.url) {
           outputUrl = mp4Output.url;
@@ -1206,10 +1207,21 @@ app.post("/webhooks/coconut", async (req, res) => {
         outputUrl = job.output.mp4.url;
         console.log(`✅ Found MP4 output (legacy format): ${outputUrl}`);
       }
+      // Additional fallback: check if output itself is a URL
+      else if (job?.output && typeof job.output === "string") {
+        outputUrl = job.output;
+        console.log(`✅ Found MP4 output (direct string): ${outputUrl}`);
+      }
+      // Check for URL in data field
+      else if (job?.url) {
+        outputUrl = job.url;
+        console.log(`✅ Found output URL in job.url: ${outputUrl}`);
+      }
       
       if (!outputUrl) {
-        console.warn(`⚠️  No MP4 output URL found in job ${jobId}`);
-        console.log("Job object:", JSON.stringify(job, null, 2));
+        console.error(`❌ No MP4 output URL found in job ${jobId}`);
+        console.error("Full job object:", JSON.stringify(job, null, 2));
+        console.error("Full request body:", JSON.stringify(req.body, null, 2));
       }
     } else if (isFailed) {
       status = "failed";
@@ -1263,6 +1275,8 @@ app.post("/webhooks/coconut", async (req, res) => {
         });
     } else if (status === "completed" && !outputUrl) {
       console.error(`❌ Job ${jobId} completed but no output URL found - cannot process`);
+      console.error(`   Expected output in: job.outputs[].url, job.output.mp4.url, or job.output`);
+      console.error(`   Check the full job object logged above`);
     }
     
     // Return 200 success immediately
