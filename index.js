@@ -581,7 +581,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
           OutputGroupSettings: {
             Type: "FILE_GROUP_SETTINGS",
             FileGroupSettings: {
-              Destination: "s3://strawberries/"
+              Destination: "s3://postready-staging/outputs/"
             }
           },
           Outputs: [
@@ -1941,3 +1941,112 @@ app.post("/webhooks/coconut", async (req, res) => {
     res.status(200).json({ success: false, error: err.message });
   }
 });
+
+/**
+ * MediaConvert webhook handler
+ * AWS MediaConvert sends job status updates via SNS->HTTP
+ */
+app.post("/webhooks/mediaconvert", async (req, res) => {
+  try {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`📨 MediaConvert Webhook Received`);
+    console.log(`${'='.repeat(60)}`);
+    
+    const message = req.body;
+    console.log("Payload:", JSON.stringify(message, null, 2));
+    
+    // Extract job details from SNS message or direct API call
+    const jobId = message.detail?.id || message.jobId || req.body.id;
+    const jobStatus = message.detail?.status || message.status;
+    
+    if (!jobId) {
+      console.error("❌ Invalid MediaConvert webhook - missing job ID");
+      return res.status(200).json({ error: "Missing job ID" });
+    }
+    
+    console.log(`Processing MediaConvert job ${jobId} with status: ${jobStatus}`);
+    
+    let status = "processing";
+    let outputUrl = null;
+    let error = null;
+    
+    if (jobStatus === "COMPLETE") {
+      status = "completed";
+      
+      // Extract output URL from outputs array
+      if (message.detail?.outputGroupDetails?.[0]?.outputDetails?.[0]?.outputFilePaths?.[0]) {
+        outputUrl = message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths[0];
+        console.log(`✅ Found output: ${outputUrl}`);
+        
+        // Copy from AWS S3 to Wasabi S3 (non-blocking)
+        const outputKey = outputUrl.replace("s3://postready-staging/outputs/", "");
+        copyToWasabi(outputKey)
+          .then((wasabiUrl) => {
+            console.log(`✅ Copied to Wasabi: ${wasabiUrl}`);
+            // Update job with Wasabi URL
+            updateCoconutJob(jobId, "completed", wasabiUrl);
+            // Try to upload to Frame.io
+            uploadToFrameIO(wasabiUrl, outputKey)
+              .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
+          })
+          .catch(err => {
+            console.error(`❌ Failed to copy to Wasabi: ${err.message}`);
+            updateCoconutJob(jobId, "completed", outputUrl); // Keep AWS S3 URL as fallback
+          });
+      } else {
+        console.error(`❌ No output file found in MediaConvert response`);
+        error = "No output file in response";
+        status = "failed";
+      }
+    } else if (jobStatus === "FAILED" || jobStatus === "ERROR") {
+      status = "failed";
+      error = message.detail?.errorMessage || "MediaConvert job failed";
+      console.error(`❌ ${error}`);
+    }
+    
+    // Update job status in database
+    if (status !== "processing") {
+      await updateCoconutJob(jobId, status, outputUrl, error);
+    }
+    
+    console.log(`${'='.repeat(60)}\n`);
+    res.status(200).json({ success: true, jobId, status });
+    
+  } catch (err) {
+    console.error("MediaConvert webhook error:", err);
+    res.status(200).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Copy file from AWS S3 to Wasabi S3
+ */
+async function copyToWasabi(outputKey) {
+  try {
+    console.log(`📋 Copying ${outputKey} from AWS S3 to Wasabi...`);
+    
+    // Get object from AWS S3
+    const getCommand = new GetObjectCommand({
+      Bucket: "postready-staging",
+      Key: `outputs/${outputKey}`
+    });
+    const response = await awsS3Client.send(getCommand);
+    
+    // Upload to Wasabi
+    const putCommand = new PutObjectCommand({
+      Bucket: "strawberries",
+      Key: outputKey,
+      Body: response.Body,
+      ContentType: "video/mp4"
+    });
+    
+    await wasabiS3Client.send(putCommand);
+    console.log(`✅ Copied to Wasabi: s3://strawberries/${outputKey}`);
+    
+    return `https://s3.eu-central-1.wasabisys.com/strawberries/${outputKey}`;
+    
+  } catch (err) {
+    console.error(`❌ Failed to copy to Wasabi: ${err.message}`);
+    throw err;
+  }
+}
