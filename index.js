@@ -449,7 +449,18 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     const lutBuffer = await lutResponse.buffer();
     fs.writeFileSync(lutFilePath, lutBuffer);
-    console.log(`   ✅ LUT downloaded (${lutBuffer.length} bytes)`);
+    
+    // Verify file was written and is accessible
+    if (!fs.existsSync(lutFilePath)) {
+      throw new Error(`LUT file not created at ${lutFilePath}`);
+    }
+    
+    const lutStats = fs.statSync(lutFilePath);
+    if (lutStats.size === 0) {
+      throw new Error(`LUT file is empty at ${lutFilePath}`);
+    }
+    
+    console.log(`   ✅ LUT downloaded (${lutBuffer.length} bytes) and verified at ${lutFilePath}`);
     
     // Step 2: Extract timecode from source video
     console.log(`   Step 2: Extracting timecode from source video...`);
@@ -491,7 +502,8 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       // Copy metadata including timecode from input
       '-map_metadata', '0',
       // Apply LUT filter - preserve video stream properties
-      '-vf', `lut3d="${lutFilePath}":interp=tetrahedral`,
+      // Escape the path for FFmpeg filter syntax
+      '-vf', `lut3d='${lutFilePath}':interp=tetrahedral`,
       // Fast encode: copy audio, use libx264 with fast preset for video
       '-c:v', 'libx264',
       '-preset', 'fast',
@@ -505,14 +517,18 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     ];
     
     const ffmpegPromise = new Promise((resolve, reject) => {
+      console.log(`   Running FFmpeg with LUT: ${lutFilePath}`);
       const ffmpeg = spawnSync('ffmpeg', ffmpegArgs, {
         stdio: ['pipe', 'pipe', 'pipe']
       });
       
       if (ffmpeg.status !== 0) {
-        const error = ffmpeg.stderr.toString();
-        console.error(`   ❌ FFmpeg error: ${error}`);
-        reject(new Error(`FFmpeg failed: ${error}`));
+        const stderr = ffmpeg.stderr.toString();
+        const stdout = ffmpeg.stdout.toString();
+        console.error(`   ❌ FFmpeg exit code: ${ffmpeg.status}`);
+        console.error(`   FFmpeg stderr:\n${stderr}`);
+        if (stdout) console.error(`   FFmpeg stdout:\n${stdout}`);
+        reject(new Error(`FFmpeg failed with code ${ffmpeg.status}: ${stderr}`));
       } else {
         console.log(`   ✅ FFmpeg processing completed`);
         resolve();
