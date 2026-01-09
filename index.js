@@ -62,6 +62,13 @@ if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaco
       secretAccessKey: AWS_SECRET_ACCESS_KEY
     }
   });
+  console.log(`✅ MediaConvert client initialized (region: ${AWS_REGION}, role: ${AWS_MEDIACONVERT_ROLE || 'NOT SET'})`);
+} else {
+  console.error(`❌ MediaConvert NOT initialized:`);
+  console.error(`   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID ? '✅ SET' : '❌ MISSING'}`);
+  console.error(`   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY ? '✅ SET' : '❌ MISSING'}`);
+  console.error(`   TRANSCODE_SERVICE: ${TRANSCODE_SERVICE}`);
+  console.error(`   AWS_MEDIACONVERT_ROLE: ${AWS_MEDIACONVERT_ROLE || '❌ MISSING'}`);
 }
 
 /* ==================== DATABASE SETUP ==================== */
@@ -183,6 +190,11 @@ console.log(`   - COCONUT_API_KEY: ${COCONUT_API_KEY ? '✅ SET' : '❌ MISSING'
 console.log(`   - FRAMEIO_TOKEN: ${FRAMEIO_TOKEN ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - FRAMEIO_PROJECT_ID: ${FRAMEIO_PROJECT_ID ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - CUBE_LUT_URL: ${CUBE_LUT_URL ? '✅ SET (color grading enabled)' : '⚪ NOT SET (optional)'}`);
+console.log(`   - TRANSCODE_SERVICE: ${TRANSCODE_SERVICE}`);
+console.log(`   - AWS_REGION: ${AWS_REGION}`);
+console.log(`   - AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID ? '✅ SET' : '❌ MISSING'}`);
+console.log(`   - AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY ? '✅ SET' : '❌ MISSING'}`);
+console.log(`   - AWS_MEDIACONVERT_ROLE: ${AWS_MEDIACONVERT_ROLE ? '✅ SET' : '❌ MISSING'}`);
 
 if (!FILEMAIL_API_KEY) {
   console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set - make sure FLY_API_TOKEN is set in GitHub Secrets!");
@@ -464,25 +476,40 @@ async function cleanupS3Staging(stagingKey) {
  * Stages file to S3 first to avoid SSL certificate issues with direct Filemail URLs
  */
 async function sendToMediaConvert(downloadUrl, filename) {
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`📡 MEDIACONVERT SUBMISSION START`);
+  console.log(`${'='.repeat(60)}`);
+  console.log(`File: ${filename}`);
+  console.log(`URL: ${downloadUrl.substring(0, 100)}...`);
+  
   if (!mediaConvertClient) {
-    throw new Error("MediaConvert not configured. Missing AWS credentials or not enabled.");
+    const err = new Error("MediaConvert not configured. Missing AWS credentials or not enabled.");
+    console.error(`❌ ${err.message}`);
+    throw err;
   }
 
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  console.log("📡 Sending to AWS MediaConvert (via S3 staging):", filename);
+  console.log(`Safe filename: ${safeFilename}`);
   
   let stagingInfo = null;
   
   try {
     // Stage file to S3 to avoid SSL certificate issues
+    console.log(`\n[Step 1/3] Starting S3 staging...`);
     stagingInfo = await stageFileToS3(downloadUrl, filename);
+    console.log(`✅ S3 staging complete`);
     const fileInput = stagingInfo.s3Url;
+    console.log(`Input for MediaConvert: ${fileInput}`);
     
     // Get LUT URL for color grading
+    console.log(`\n[Step 2/3] Checking LUT configuration...`);
     const lutUrl = await getLutUrl();
     const hasLut = lutUrl && lutUrl.length > 0;
+    console.log(`LUT configured: ${hasLut}`);
+    if (hasLut) console.log(`LUT URL: ${lutUrl.substring(0, 50)}...`);
     
     // Build MediaConvert job
+    console.log(`\n[Step 3/3] Building MediaConvert job...`);
     const jobSettings = {
       OutputGroups: [
         {
@@ -583,6 +610,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
       }
     };
 
+    console.log(`Submitting to MediaConvert API...`);
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       Settings: jobSettings,
@@ -590,11 +618,14 @@ async function sendToMediaConvert(downloadUrl, filename) {
       StatusUpdateInterval: "SECONDS_30"
     });
 
+    console.log(`Sending CreateJobCommand...`);
     const response = await mediaConvertClient.send(createJobCommand);
+    console.log(`✅ API response received`);
     
-    console.log(`✅ MediaConvert job created: ${response.Job.Id}`);
+    console.log(`\n✅ MediaConvert job created: ${response.Job.Id}`);
     console.log(`   Status: ${response.Job.Status}`);
     console.log(`   ${hasLut ? '🎨 LUT color grading enabled' : '⏭️  No LUT configured'}`);
+    console.log(`${'='.repeat(60)}\n`);
     
     // Clean up temp file
     try {
@@ -614,7 +645,14 @@ async function sendToMediaConvert(downloadUrl, filename) {
     };
     
   } catch (err) {
-    console.error(`❌ MediaConvert error: ${err.message}`);
+    console.error(`\n${'='.repeat(60)}`);
+    console.error(`❌ MEDIACONVERT FAILED`);
+    console.error(`${'='.repeat(60)}`);
+    console.error(`Error: ${err.message}`);
+    console.error(`Error type: ${err.name}`);
+    console.error(`Stack: ${err.stack}`);
+    console.error(`${'='.repeat(60)}\n`);
+    
     // Clean up temp file if it exists
     if (stagingInfo?.tempLocalPath && fs.existsSync(stagingInfo.tempLocalPath)) {
       try {
