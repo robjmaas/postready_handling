@@ -430,7 +430,9 @@ async function sendToCoconut(downloadUrl, filename) {
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  const stagingKey = `staging/${Date.now()}_${safeFilename}`;
+  // Use hash of timestamp + filename to avoid MediaConvert appending input filename to output
+  const stagingId = Buffer.from(Date.now() + Math.random()).toString('hex').substring(0, 8);
+  const stagingKey = `staging/tmp_${stagingId}`;
   
   return new Promise((resolve, reject) => {
     try {
@@ -2045,12 +2047,6 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
     
     if (job.Status === "COMPLETE") {
       console.log(`✅ Job complete! Extracting output...`);
-      
-      // Check for output errors
-      if (job.OutputGroupDetails?.length > 0) {
-        const outputDetails = job.OutputGroupDetails[0];
-        console.log(`Output details:`, JSON.stringify(outputDetails, null, 2));
-      }
       
       // Extract output filename from MediaConvert settings
       const outputGroup = job.Settings?.OutputGroups?.[0];
