@@ -10,7 +10,7 @@ import path from "path";
 import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, CreateBucketCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
@@ -455,15 +455,34 @@ async function stageFileToS3Impl(downloadUrl, filename, stagingKey, tempLocalPat
     console.log(`📥 Staging to AWS S3 (for MediaConvert): ${filename}`);
     console.log(`   S3 key: ${stagingKey}`);
     
-    // Download from Filemail to temp file (60 min timeout for large files)
-    console.log(`   Downloading from Filemail (timeout: 60 minutes)...`);
+    // Download from Filemail to temp file (240 min timeout for very large files)
+    console.log(`   Downloading from Filemail (timeout: 4 hours)...`);
     const startTime = Date.now();
-    await downloadFileWithTimeout(downloadUrl, tempLocalPath, 60 * 60 * 1000);
+    await downloadFileWithTimeout(downloadUrl, tempLocalPath, 4 * 60 * 60 * 1000);
     const dlTime = (Date.now() - startTime) / 1000;
     console.log(`   ✅ Downloaded in ${(dlTime / 60).toFixed(1)} minutes`);
     
     // Upload to AWS S3 staging area
     console.log(`   Uploading to AWS S3...`);
+    
+    // Try to create bucket if it doesn't exist (will fail silently if it already exists)
+    try {
+      const createBucketCommand = new CreateBucketCommand({
+        Bucket: "postready-staging"
+      });
+      await awsS3Client.send(createBucketCommand);
+      console.log(`   ✅ Bucket created`);
+    } catch (bucketErr) {
+      // Bucket already exists or other error - continue anyway
+      if (bucketErr.name === "BucketAlreadyOwnedByYou") {
+        console.log(`   ℹ️  Bucket already exists`);
+      } else if (bucketErr.code === "BucketAlreadyExists") {
+        console.log(`   ℹ️  Bucket already exists (owned by another account)`);
+      } else {
+        console.log(`   ⚠️  Bucket status: ${bucketErr.message}`);
+      }
+    }
+    
     const fileStream = fs.createReadStream(tempLocalPath);
     
     const putCommand = new PutObjectCommand({
@@ -717,12 +736,12 @@ async function getLutUrl() {
  */
 async function downloadFile(url, filepath) {
   return new Promise((resolve, reject) => {
-    const timeoutMs = 30 * 60 * 1000; // 30 minute timeout for large files
+    const timeoutMs = 4 * 60 * 60 * 1000; // 4 hour timeout for very large files (50GB+)
     let timeout = setTimeout(() => {
       file?.close?.();
       fs.unlink(filepath, () => {});
       req?.abort?.();
-      reject(new Error(`Download timeout after ${timeoutMs / 1000 / 60} minutes: ${url}`));
+      reject(new Error(`Download timeout after ${timeoutMs / 1000 / 60 / 60} hours: ${url}`));
     }, timeoutMs);
     
     let file = null;
@@ -741,12 +760,13 @@ async function downloadFile(url, filepath) {
       
       // Clear timeout on successful response
       clearTimeout(timeout);
+      const stallTimeout = 30 * 60 * 1000; // 30 min inactivity timeout
       const newTimeout = setTimeout(() => {
         file.close();
         fs.unlink(filepath, () => {});
         req?.abort?.();
         reject(new Error(`Download stalled for 30 minutes: ${url}`));
-      }, timeoutMs);
+      }, stallTimeout);
       
       // Handle redirects
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
@@ -775,12 +795,13 @@ async function downloadFile(url, filepath) {
         
         // Reset timeout on each data chunk
         clearTimeout(newTimeout);
-        timeout = setTimeout(() => {
+        const stallTimeout = 30 * 60 * 1000; // 30 min inactivity timeout
+        newTimeout = setTimeout(() => {
           file.close();
           fs.unlink(filepath, () => {});
           req?.abort?.();
           reject(new Error(`Download stalled (no data for 30 minutes): ${url}`));
-        }, timeoutMs);
+        }, stallTimeout);
       });
       
       response.pipe(file);
