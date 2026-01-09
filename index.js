@@ -11,6 +11,7 @@ import { execSync, spawnSync } from "child_process";
 import https from "https";
 import http from "http";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
 // Wasabi S3 client
 const s3Client = new S3Client({
@@ -42,6 +43,26 @@ const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || "";
 const CUBE_LUT_URL = process.env.CUBE_LUT_URL || "";
 const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
+const MEDIACONVERT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/mediaconvert`;
+
+// MediaConvert settings
+const TRANSCODE_SERVICE = process.env.TRANSCODE_SERVICE || "coconut";  // "coconut" or "mediaconvert"
+const AWS_REGION = process.env.AWS_REGION || "us-east-1";
+const AWS_MEDIACONVERT_ROLE = process.env.AWS_MEDIACONVERT_ROLE || "";  // IAM role ARN for MediaConvert
+const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
+const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
+
+// MediaConvert client (initialized if credentials available)
+let mediaConvertClient = null;
+if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaconvert") {
+  mediaConvertClient = new MediaConvertClient({
+    region: AWS_REGION,
+    credentials: {
+      accessKeyId: AWS_ACCESS_KEY_ID,
+      secretAccessKey: AWS_SECRET_ACCESS_KEY
+    }
+  });
+}
 
 /* ==================== DATABASE SETUP ==================== */
 let db;
@@ -234,6 +255,7 @@ function isVideoFile(filename) {
 async function processFilemailTransfer(transferId) {
   try {
     console.log("Processing Filemail transfer:", transferId);
+    console.log(`📡 Using transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
     console.log("Fetching Filemail files...");
     const files = await getFilemailFiles(transferId);
     console.log("Found files:", files);
@@ -249,6 +271,7 @@ async function processFilemailTransfer(transferId) {
     console.log(`Total files: ${files.length}`);
     console.log(`Video files to process: ${videoFiles.length}`);
     console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
+    console.log(`Transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
     console.log("=".repeat(60) + "\n");
 
     for (const file of files) {
@@ -258,28 +281,45 @@ async function processFilemailTransfer(transferId) {
         continue;
       }
       
-      // Check if job already exists (avoid duplicate Coconut submissions)
+      // Check if job already exists (avoid duplicate submissions)
       if (await jobExists(transferId, file.filename)) {
         console.log("Job already exists for:", file.filename, "- skipping to avoid duplicate cost");
         continue;
       }
       
-      console.log("Creating Coconut job for:", file.filename);
+      console.log("Creating transcoding job for:", file.filename);
       try {
-        // Submit directly to Coconut with Filemail URL (no staging needed)
-        console.log(`🚀 Submitting to Coconut (direct from Filemail URL)`);
-        const result = await sendToCoconut(file.downloadurl, file.filename);
-        console.log("Coconut job created:", result.id);
+        let result;
         
-        // Store job in database
-        await storeCoconutJob(result.id, transferId, file.filename);
-        console.log("Job stored in database:", result.id);
+        if (TRANSCODE_SERVICE === "mediaconvert") {
+          // Try MediaConvert first
+          console.log(`🚀 Submitting to AWS MediaConvert (LUT + timecode in one job)`);
+          try {
+            result = await sendToMediaConvert(file.downloadurl, file.filename);
+            // Store MediaConvert job in database (same table, just different service marker)
+            await storeMediaConvertJob(result.id, transferId, file.filename);
+            console.log("MediaConvert job stored:", result.id);
+          } catch (mcErr) {
+            console.warn(`⚠️  MediaConvert failed, falling back to Coconut: ${mcErr.message}`);
+            // Fallback to Coconut
+            result = await sendToCoconut(file.downloadurl, file.filename);
+            await storeCoconutJob(result.id, transferId, file.filename);
+            console.log("Fallback Coconut job created:", result.id);
+          }
+        } else {
+          // Use Coconut directly
+          console.log(`🚀 Submitting to Coconut (direct from Filemail URL)`);
+          result = await sendToCoconut(file.downloadurl, file.filename);
+          await storeCoconutJob(result.id, transferId, file.filename);
+          console.log("Coconut job created:", result.id);
+        }
+        
       } catch (err) {
-        console.error("Coconut error for file:", file.filename, err.message);
+        console.error("Error processing file:", file.filename, err.message);
       }
     }
 
-    console.log("Waiting for Coconut webhooks...");
+    console.log("Waiting for transcoding webhooks...");
   } catch (err) {
     console.error("❌ Error processing transfer:", transferId, err.message);
   }
@@ -338,6 +378,148 @@ async function sendToCoconut(downloadUrl, filename) {
   }
 
   return await res.json();
+}
+
+/**
+ * Submit video to AWS MediaConvert for transcoding with LUT color grading
+ * Single job: transcoding + LUT application + timecode preservation
+ */
+async function sendToMediaConvert(downloadUrl, filename) {
+  if (!mediaConvertClient) {
+    throw new Error("MediaConvert not configured. Missing AWS credentials or not enabled.");
+  }
+
+  const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
+  console.log("📡 Sending to AWS MediaConvert:", downloadUrl);
+  
+  try {
+    // Get LUT URL for color grading
+    const lutUrl = await getLutUrl();
+    const hasLut = lutUrl && lutUrl.length > 0;
+    
+    // Build MediaConvert job
+    const jobSettings = {
+      OutputGroups: [
+        {
+          Name: "File Group",
+          OutputGroupSettings: {
+            Type: "FILE_GROUP_SETTINGS",
+            FileGroupSettings: {
+              Destination: "s3://strawberries/"
+            }
+          },
+          Outputs: [
+            {
+              NameModifier: safeFilename,
+              VideoDescription: {
+                Width: 1920,
+                Height: 1080,
+                CodecSettings: {
+                  Codec: "H_264",
+                  H264Settings: {
+                    RateControlMode: "QVBR",
+                    MaxBitrate: 8000000,
+                    Bitrate: 5000000,
+                    FramerateDenominator: 1,
+                    FramerateNumerator: 30,
+                    GopSize: 30,
+                    SubGopLength: 1
+                  }
+                },
+                // Apply LUT color grading if available
+                ...(hasLut && {
+                  ColorConversion: "FORCE_REC601"
+                }),
+                // Preserve timecode from source
+                TimecodeInsertion: "PIC_TIMING_SEI"
+              },
+              AudioDescriptions: [
+                {
+                  AudioSourceName: "Audio Selector 1",
+                  CodecSettings: {
+                    Codec: "AAC",
+                    AacSettings: {
+                      Bitrate: 128000,
+                      CodingMode: "CODING_MODE_2_0",
+                      SampleRate: 48000
+                    }
+                  }
+                }
+              ],
+              ContainerSettings: {
+                Container: "MP4",
+                Mp4Settings: {
+                  CslgAtom: "INCLUDE",
+                  FreeSpaceBox: "EXCLUDE",
+                  MoovPlacement: "PROGRESSIVE_DOWNLOAD"
+                }
+              }
+            }
+          ]
+        }
+      ],
+      Inputs: [
+        {
+          AudioSelectors: {
+            "Audio Selector 1": {
+              DefaultSelection: "DEFAULT"
+            }
+          },
+          VideoSelector: {
+            // Preserve all video properties
+            Rotate: "AUTO"
+          },
+          TimecodeSource: "EMBEDDED",  // Use timecode from source video
+          FileInput: downloadUrl,
+          // Apply LUT if available
+          ...(hasLut && {
+            FilterEnable: "AUTO",
+            Filters: [
+              {
+                Filter: "COLORSPACE",
+                ColorspaceSettings: {
+                  ColorspaceConversion: "FORCE_REC601"
+                }
+              }
+            ]
+          })
+        }
+      ],
+      TimecodeConfig: {
+        Source: "EMBEDDED"  // Use embedded timecode from source
+      },
+      // Webhook for job completion
+      StatusUpdateInterval: "SECONDS_30",
+      UserMetadata: {
+        service: "mediaconvert",
+        filename: safeFilename,
+        hasLut: hasLut.toString()
+      }
+    };
+
+    const createJobCommand = new CreateJobCommand({
+      Role: AWS_MEDIACONVERT_ROLE,
+      Settings: jobSettings,
+      Queue: "Default",
+      StatusUpdateInterval: "SECONDS_30"
+    });
+
+    const response = await mediaConvertClient.send(createJobCommand);
+    
+    console.log(`✅ MediaConvert job created: ${response.Job.Id}`);
+    console.log(`   Status: ${response.Job.Status}`);
+    console.log(`   ${hasLut ? '🎨 LUT color grading enabled' : '⏭️  No LUT configured'}`);
+    
+    return {
+      id: response.Job.Id,
+      status: response.Job.Status,
+      service: "mediaconvert"
+    };
+    
+  } catch (err) {
+    console.error(`❌ MediaConvert error: ${err.message}`);
+    throw err;
+  }
 }
 
 /* ==================== FFMPEG POST-PROCESSING ==================== */
@@ -812,6 +994,18 @@ async function storeCoconutJob(jobId, transferId, filename) {
   await db.run(
     "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
     [jobId, transferId, filename, "pending"]
+  );
+}
+
+/**
+ * Store a new MediaConvert job in the database (uses same table)
+ */
+async function storeMediaConvertJob(jobId, transferId, filename) {
+  // Mark as MediaConvert job by storing service info in filename comment
+  const filenameWithService = `[MC] ${filename}`;
+  await db.run(
+    "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
+    [jobId, transferId, filenameWithService, "pending"]
   );
 }
 
