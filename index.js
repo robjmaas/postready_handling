@@ -10,7 +10,7 @@ import path from "path";
 import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
 
@@ -79,6 +79,20 @@ if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaco
   console.error(`   AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY ? '✅ SET' : '❌ MISSING'}`);
   console.error(`   TRANSCODE_SERVICE: ${TRANSCODE_SERVICE}`);
   console.error(`   AWS_MEDIACONVERT_ROLE: ${AWS_MEDIACONVERT_ROLE || '❌ MISSING'}`);
+}
+
+// Test AWS S3 bucket access on startup
+async function testS3BucketAccess() {
+  try {
+    const headBucketCommand = new HeadBucketCommand({
+      Bucket: "postready-staging"
+    });
+    await awsS3Client.send(headBucketCommand);
+    console.log(`✅ AWS S3 bucket 'postready-staging' is accessible`);
+  } catch (err) {
+    console.error(`❌ Cannot access AWS S3 bucket 'postready-staging': ${err.message}`);
+    console.error(`   This may cause MediaConvert staging to fail`);
+  }
 }
 
 /* ==================== DATABASE SETUP ==================== */
@@ -164,6 +178,7 @@ async function jobExists(transferId, filename) {
 
 // Initialize database on startup
 await initDb();
+await testS3BucketAccess();
 
 const app = express();
 app.use(express.json());
