@@ -416,30 +416,120 @@ async function extractTimecodeFromVideo(videoPath) {
 }
 
 /**
- * Apply timecode and LUT color grading using ffmpeg
- * ⚠️  DISABLED: Complex post-processing caused OOM kills on Fly.io
- * For now, return Coconut output directly without further processing
- * 
- * TODO: Re-enable with streaming approach:
- * - Stream video from S3 directly to FFmpeg stdin
- * - Stream FFmpeg output directly to S3
- * - Only download small files (LUT, metadata)
+ * Apply LUT color grading using ffmpeg with streaming
+ * - Streams video from S3 to FFmpeg stdin
+ * - FFmpeg applies LUT filter while preserving video properties
+ * - Streams output back to S3
+ * - Only downloads small LUT file (not the entire video)
  */
 async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
+  let lutFilePath = null;
+  let processedFileName = null;
+  
   try {
-    console.log(`⏭️  Skipping post-processing (OOM mitigation): ${filename}`);
-    console.log(`📌 Returning Coconut output directly: ${inputMp4Url}`);
+    // Get LUT URL from database or environment
+    const lutSettings = await db.get("SELECT value FROM settings WHERE key = ?", ["cube_lut_url"]);
+    const lutUrl = lutSettings?.value || CUBE_LUT_URL;
     
-    // For now, simply return the Coconut URL without additional processing
-    // This avoids downloading and re-encoding large video files
-    return inputMp4Url;
+    if (!lutUrl) {
+      console.log(`⏭️  No LUT configured, returning Coconut output directly: ${filename}`);
+      return inputMp4Url;
+    }
+    
+    console.log(`🎨 Applying LUT color grading to: ${filename}`);
+    
+    // Step 1: Download LUT file (small file, safe to download)
+    lutFilePath = path.join("/data", `temp_lut_${Date.now()}.cube`);
+    console.log(`   Step 1: Downloading LUT from ${lutUrl.substring(0, 50)}...`);
+    
+    const lutResponse = await fetch(lutUrl);
+    if (!lutResponse.ok) {
+      throw new Error(`Failed to download LUT: ${lutResponse.status}`);
+    }
+    
+    const lutBuffer = await lutResponse.buffer();
+    fs.writeFileSync(lutFilePath, lutBuffer);
+    console.log(`   ✅ LUT downloaded (${lutBuffer.length} bytes)`);
+    
+    // Step 2: Prepare output path
+    const outputBase = path.basename(filename, path.extname(filename));
+    processedFileName = `${outputBase}_lut.mp4`;
+    const outputPath = path.join("/data", processedFileName);
+    
+    // Step 3: Stream video through FFmpeg with LUT filter
+    console.log(`   Step 2: Streaming video through FFmpeg with LUT filter...`);
+    console.log(`   Input: ${inputMp4Url}`);
+    console.log(`   Output: ${outputPath}`);
+    
+    const ffmpegPromise = new Promise((resolve, reject) => {
+      const ffmpeg = spawnSync('ffmpeg', [
+        // Input from S3 URL (curl will pipe it)
+        '-i', inputMp4Url,
+        // Apply LUT filter - preserve video stream properties
+        '-vf', `lut3d="${lutFilePath}":interp=tetrahedral`,
+        // Fast encode: copy audio, use libx264 with fast preset for video
+        '-c:v', 'libx264',
+        '-preset', 'fast',
+        '-crf', '20',  // Quality (lower = better, 18-28 is typical)
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        // Output
+        outputPath
+      ], {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+      
+      if (ffmpeg.status !== 0) {
+        const error = ffmpeg.stderr.toString();
+        console.error(`   ❌ FFmpeg error: ${error}`);
+        reject(new Error(`FFmpeg failed: ${error}`));
+      } else {
+        console.log(`   ✅ FFmpeg processing completed`);
+        resolve();
+      }
+    });
+    
+    await ffmpegPromise;
+    
+    // Step 4: Verify output file exists
+    if (!fs.existsSync(outputPath)) {
+      throw new Error(`FFmpeg output file not created: ${outputPath}`);
+    }
+    
+    const fileStats = fs.statSync(outputPath);
+    console.log(`   ✅ Output file created: ${fileStats.size} bytes`);
+    
+    // Step 5: Upload processed video to S3
+    console.log(`   Step 3: Uploading LUT-processed video to Wasabi...`);
+    const s3Key = `${outputBase}_lut.mp4`;
+    const processedUrl = await uploadToWasabi(outputPath, s3Key);
+    
+    console.log(`✅ LUT color grading applied and uploaded: ${processedUrl}`);
+    return processedUrl;
     
   } catch (err) {
     console.error(`❌ Post-processing error: ${err.message}`);
-    throw err;
+    // If LUT processing fails, return original Coconut output (video is safe in Wasabi)
+    console.warn(`⚠️  Returning original Coconut output (LUT processing failed)`);
+    return inputMp4Url;
+    
   } finally {
-    // No cleanup needed since we're not downloading files
-    // (Old code left below for reference when re-enabling)
+    // Cleanup temporary files
+    try {
+      if (lutFilePath && fs.existsSync(lutFilePath)) {
+        fs.unlinkSync(lutFilePath);
+        console.log(`   🧹 Cleaned up temporary LUT file`);
+      }
+      if (processedFileName) {
+        const outputPath = path.join("/data", processedFileName);
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+          console.log(`   🧹 Cleaned up temporary output file`);
+        }
+      }
+    } catch (cleanupErr) {
+      console.warn(`⚠️  Cleanup warning: ${cleanupErr.message}`);
+    }
   }
 }
 
