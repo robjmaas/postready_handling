@@ -314,16 +314,19 @@ async function processFilemailTransfer(transferId) {
       try {
         let result;
         
-        if (TRANSCODE_SERVICE === "mediaconvert") {
-          // Try MediaConvert first
+      // Try MediaConvert first
           console.log(`🚀 Submitting to AWS MediaConvert (LUT + timecode in one job)`);
           try {
+            console.log(`   Attempting MediaConvert submission...`);
             result = await sendToMediaConvert(file.downloadurl, file.filename);
             // Store MediaConvert job in database (same table, just different service marker)
             await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
-            console.log("MediaConvert job stored:", result.id);
+            console.log(`✅ MediaConvert job stored: ${result.id}`);
           } catch (mcErr) {
-            console.warn(`⚠️  MediaConvert failed, falling back to Coconut: ${mcErr.message}`);
+            console.warn(`\n⚠️  MediaConvert FAILED:`);
+            console.warn(`   Error: ${mcErr.message}`);
+            console.warn(`   Stack: ${mcErr.stack}`);
+            console.warn(`   Falling back to Coconut...\n`);
             // Fallback to Coconut
             result = await sendToCoconut(file.downloadurl, file.filename);
             await storeCoconutJob(result.id, transferId, file.filename);
@@ -818,12 +821,12 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
     
     console.log(`   ✅ LUT downloaded (${lutBuffer.length} bytes) and verified at ${lutFilePath}`);
     
-    // Step 2: Extract timecode from source video (non-blocking)
+    // Step 2: Extract timecode from source video
     console.log(`   Step 2: Extracting timecode from source video...`);
     let timecodeArg = '';
     
-    // Skip timecode extraction to avoid blocking - FFmpeg will handle defaults
-    console.log(`   ⏭️  Using default timecode (00:00:00:00)`);
+    // Don't force timecode - let FFmpeg preserve it from input
+    console.log(`   ⏭️  Preserving embedded timecode from source`);
     
     // Step 3: Prepare output path
     const outputBase = path.basename(filename, path.extname(filename));
@@ -849,8 +852,8 @@ async function postProcessWithFFmpeg(inputMp4Url, sourceVideoUrl, filename) {
       '-crf', '20',  // Quality (lower = better, 18-28 is typical)
       '-c:a', 'aac',
       '-b:a', '128k',
-      // Copy timecode if present in source
-      '-timecode', '00:00:00:00',  // Default timecode if none exists
+      // Preserve timecode from source video
+      '-copy_unknown',  // Copy all unknown metadata including timecode
       // Output
       outputPath
     ];
@@ -1809,42 +1812,60 @@ app.post("/webhooks/coconut", async (req, res) => {
       }
     }
     
-    // If completed, run ffmpeg post-processing then upload to Frame.io
+    // If completed, check which service was used and handle accordingly
     if (status === "completed" && outputUrl) {
       // Extract filename from the output URL or use job ID
       const urlParts = outputUrl.split("/");
       const filename = urlParts[urlParts.length - 1] || `${jobId}.mp4`;
       
-      console.log(`🎬 Starting ffmpeg post-processing for: ${filename}`);
+      // Check if this is a MediaConvert job by looking at the filename marker
+      const jobRow = await db.get("SELECT filename FROM coconut_jobs WHERE id = ?", [jobId]);
+      const isMediaConvertJob = jobRow?.filename?.startsWith("[MC]");
       
-      postProcessWithFFmpeg(outputUrl, outputUrl, filename)
-        .then((processedUrl) => {
-          console.log(`✅ Post-processing complete: ${processedUrl}`);
-          console.log(`📤 Video is ready in Wasabi: ${processedUrl}`);
-          
-          // Try to upload to Frame.io after post-processing
-          // This is non-blocking - video is already safely stored in Wasabi
-          uploadToFrameIO(processedUrl, filename)
-            .then((frameioResult) => {
-              if (frameioResult) {
-                console.log(`✅ Also uploaded to Frame.io: ${frameioResult.id}`);
-              } else {
-                console.warn(`⚠️  Frame.io upload skipped or failed (video is safe in Wasabi)`);
-              }
-            })
-            .catch((err) => {
-              console.error(`⚠️  Frame.io upload failed (non-blocking): ${err.message}`);
-              console.log(`   Video is safely stored in Wasabi - Frame.io is optional`);
-            });
-        })
-        .catch((err) => {
-          console.error(`❌ Post-processing failed:`, err.message);
-        });
-    } else if (status === "completed" && !outputUrl) {
-      console.error(`❌ Job ${jobId} completed but no output URL found - cannot process`);
-      console.error(`   Expected output in: job.outputs[].url, job.output.mp4.url, or job.output`);
-      console.error(`   Check the full job object logged above`);
-    }
+      if (isMediaConvertJob) {
+        console.log(`🎬 MediaConvert job detected - skipping FFmpeg (already has LUT + timecode)`);
+        console.log(`📤 Video is ready in Wasabi: ${outputUrl}`);
+        
+        // Go directly to Frame.io upload for MediaConvert jobs
+        uploadToFrameIO(outputUrl, filename.replace(/^\[MC\]\s/, ''))
+          .then((frameioResult) => {
+            if (frameioResult) {
+              console.log(`✅ Uploaded to Frame.io: ${frameioResult.id}`);
+            } else {
+              console.warn(`⚠️  Frame.io upload skipped or failed (video is safe in Wasabi)`);
+            }
+          })
+          .catch((err) => {
+            console.error(`⚠️  Frame.io upload failed: ${err.message}`);
+          });
+      } else {
+        // For Coconut jobs, apply FFmpeg post-processing for LUT color grading
+        console.log(`🎬 Coconut job detected - starting FFmpeg post-processing for LUT color grading`);
+        
+        postProcessWithFFmpeg(outputUrl, outputUrl, filename)
+          .then((processedUrl) => {
+            console.log(`✅ Post-processing complete: ${processedUrl}`);
+            console.log(`📤 Video is ready in Wasabi: ${processedUrl}`);
+            
+            // Try to upload to Frame.io after post-processing
+            // This is non-blocking - video is already safely stored in Wasabi
+            uploadToFrameIO(processedUrl, filename)
+              .then((frameioResult) => {
+                if (frameioResult) {
+                  console.log(`✅ Also uploaded to Frame.io: ${frameioResult.id}`);
+                } else {
+                  console.warn(`⚠️  Frame.io upload skipped or failed (video is safe in Wasabi)`);
+                }
+              })
+              .catch((err) => {
+                console.error(`⚠️  Frame.io upload failed (non-blocking): ${err.message}`);
+                console.log(`   Video is safely stored in Wasabi - Frame.io is optional`);
+              });
+          })
+          .catch((err) => {
+            console.error(`❌ Post-processing failed:`, err.message);
+          });
+      }
     
     // Return 200 success immediately
     res.status(200).json({ success: true, jobId, status });
