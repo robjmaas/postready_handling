@@ -649,59 +649,86 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Find or create 'dailies' folder (only once, cached globally)
+    // Step 2: Find or create 'dailies' folder (cached in memory and database)
     let dailiesFolderId = frameIODailiesFolderId;
     
     if (!dailiesFolderId) {
-      console.log(`   Step 2: Looking for 'dailies' folder (first time)...`);
+      console.log(`   Step 2: Looking for 'dailies' folder...`);
       
-      // Fetch root folder's children to find 'dailies'
-      const childrenRes = await fetch(
-        `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-        {
-          method: "GET",
-          headers: {
-            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-            "Content-Type": "application/json"
-          }
-        }
+      // Check if we have a stored dailies folder ID in database
+      const storedSettings = await db.get(
+        "SELECT value FROM settings WHERE key = ?",
+        ["frameio_dailies_folder_id"]
       );
-
-      if (childrenRes.ok) {
-        const children = await childrenRes.json();
-        const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
-        if (dailiesFolder) {
-          dailiesFolderId = dailiesFolder.id;
-          frameIODailiesFolderId = dailiesFolderId;  // Cache it
-          console.log(`   Found existing 'dailies' folder: ${dailiesFolderId}`);
-        }
-      }
-
-      // If 'dailies' folder doesn't exist, create it
-      if (!dailiesFolderId) {
-        console.log(`   'dailies' folder not found, creating...`);
-        const createFolderRes = await fetch(
+      
+      if (storedSettings?.value) {
+        dailiesFolderId = storedSettings.value;
+        frameIODailiesFolderId = dailiesFolderId;
+        console.log(`   ✅ Using stored dailies folder ID from database: ${dailiesFolderId}`);
+      } else {
+        // Fetch root folder's children to find 'dailies'
+        console.log(`   Searching Frame.io for existing 'dailies' folder...`);
+        const childrenRes = await fetch(
           `https://api.frame.io/v2/assets/${rootAssetId}/children`,
           {
-            method: "POST",
+            method: "GET",
             headers: {
               "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
               "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              name: "dailies",
-              type: "folder"
-            })
+            }
           }
         );
 
-        if (createFolderRes.ok) {
-          const folderData = await createFolderRes.json();
-          dailiesFolderId = folderData.id;
-          frameIODailiesFolderId = dailiesFolderId;  // Cache it
-          console.log(`   Created 'dailies' folder: ${dailiesFolderId}`);
-        } else {
-          throw new Error(`Failed to create 'dailies' folder: ${createFolderRes.status}`);
+        if (childrenRes.ok) {
+          const children = await childrenRes.json();
+          const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
+          if (dailiesFolder) {
+            dailiesFolderId = dailiesFolder.id;
+            frameIODailiesFolderId = dailiesFolderId;  // Cache in memory
+            
+            // Store in database for persistence across restarts
+            await db.run(
+              "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+              ["frameio_dailies_folder_id", dailiesFolderId]
+            );
+            
+            console.log(`   ✅ Found existing 'dailies' folder: ${dailiesFolderId}`);
+          }
+        }
+
+        // If 'dailies' folder doesn't exist, create it
+        if (!dailiesFolderId) {
+          console.log(`   'dailies' folder not found, creating new one...`);
+          const createFolderRes = await fetch(
+            `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+            {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({
+                name: "dailies",
+                type: "folder"
+              })
+            }
+          );
+
+          if (createFolderRes.ok) {
+            const folderData = await createFolderRes.json();
+            dailiesFolderId = folderData.id;
+            frameIODailiesFolderId = dailiesFolderId;  // Cache in memory
+            
+            // Store in database for persistence across restarts
+            await db.run(
+              "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+              ["frameio_dailies_folder_id", dailiesFolderId]
+            );
+            
+            console.log(`   ✅ Created new 'dailies' folder: ${dailiesFolderId}`);
+          } else {
+            throw new Error(`Failed to create 'dailies' folder: ${createFolderRes.status}`);
+          }
         }
       }
     } else {
