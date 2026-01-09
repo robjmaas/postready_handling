@@ -1068,7 +1068,7 @@ async function uploadToWasabi(localFilePath, s3Key) {
     });
     
     console.log(`   Sending to S3...`);
-    await s3Client.send(command);
+    await awsS3Client.send(command);
     console.log(`   ✅ S3 upload complete`);
     
     const wasabiUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${s3Key}`;
