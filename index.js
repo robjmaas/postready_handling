@@ -419,7 +419,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
                   H264Settings: {
                     RateControlMode: "QVBR",
                     MaxBitrate: 8000000,
-                    Bitrate: 5000000,
+                    // QVBR mode: do NOT specify Bitrate (only MaxBitrate)
                     FramerateDenominator: 1,
                     FramerateNumerator: 30,
                     GopSize: 30,
