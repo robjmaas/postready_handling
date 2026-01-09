@@ -761,7 +761,7 @@ async function downloadFile(url, filepath) {
       // Clear timeout on successful response
       clearTimeout(timeout);
       const stallTimeout = 30 * 60 * 1000; // 30 min inactivity timeout
-      const newTimeout = setTimeout(() => {
+      let newTimeout = setTimeout(() => {
         file.close();
         fs.unlink(filepath, () => {});
         req?.abort?.();
