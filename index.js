@@ -2040,6 +2040,8 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
     const job = jobResponse.Job;
     
     console.log(`Job status: ${job.Status}`);
+    console.log(`Job error (if any): ${job.ErrorMessage || 'None'}`);
+    console.log(`Job has outputs: ${job.OutputGroupDetails?.length > 0}`);
     
     if (job.Status === "COMPLETE") {
       console.log(`✅ Job complete! Extracting output...`);
