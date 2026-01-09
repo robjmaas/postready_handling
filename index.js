@@ -594,8 +594,20 @@ async function uploadToFrameIO(videoUrl, filename) {
     
     // Step 4: Create asset in 'dailies' folder with presigned URL as source
     console.log(`   Step 4: Creating asset in 'dailies' folder...`);
+    console.log(`   Presigned URL: ${presignedUrl.substring(0, 100)}...`);
     
     // Create asset with source pointing to presigned URL - Frame.io can access this
+    const requestBody = {
+      name: filename,
+      type: "file",
+      source: {
+        type: "url",
+        url: presignedUrl
+      }
+    };
+    
+    console.log(`   Request body: ${JSON.stringify(requestBody).substring(0, 200)}...`);
+    
     const createRes = await fetch(
       `https://api.frame.io/v2/assets/${dailiesFolderId}/children`,
       {
@@ -604,15 +616,7 @@ async function uploadToFrameIO(videoUrl, filename) {
           "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          name: filename,
-          type: "file",
-          filetype: "video/mp4",
-          source: {
-            type: "url",
-            url: presignedUrl
-          }
-        })
+        body: JSON.stringify(requestBody)
       }
     );
 
@@ -621,6 +625,8 @@ async function uploadToFrameIO(videoUrl, filename) {
     if (!createRes.ok) {
       console.error(`❌ Frame.io API error ${createRes.status}`);
       console.error(`   Response: ${createResponseText}`);
+      console.error(`   Presigned URL length: ${presignedUrl.length}`);
+      console.error(`   Request body was: ${JSON.stringify(requestBody)}`);
       throw new Error(`Frame.io API error ${createRes.status}: ${createResponseText}`);
     }
 
