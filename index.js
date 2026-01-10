@@ -2134,7 +2134,7 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
         status: "completed",
         jobId,
         s3Url: outputPath,
-        outputKey
+        outputKey: actualOutputKey
       });
     } else if (job.Status === "FAILED" || job.Status === "CANCELED") {
       console.error(`❌ Job failed with status: ${job.Status}`);
