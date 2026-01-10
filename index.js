@@ -299,10 +299,11 @@ function isVideoFile(filename) {
   return videoExtensions.includes(ext);
 }
 
-async function processFilemailTransfer(transferId) {
+async function processFilemailTransfer(transferId, presetName = "default") {
   try {
     console.log("Processing Filemail transfer:", transferId);
     console.log(`📡 Using transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
+    console.log(`🎨 Using preset: ${presetName}`);
     console.log("Fetching Filemail files...");
     const files = await getFilemailFiles(transferId);
 
@@ -318,6 +319,7 @@ async function processFilemailTransfer(transferId) {
     console.log(`Video files to process: ${videoFiles.length}`);
     console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
     console.log(`Transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
+    console.log(`Preset: ${presetName}`);
     console.log("=".repeat(60) + "\n");
 
     for (const file of files) {
@@ -341,7 +343,7 @@ async function processFilemailTransfer(transferId) {
         console.log(`🚀 Submitting to AWS MediaConvert (DCI-P3 color + embedded timecode)`);
         try {
           console.log(`   Attempting MediaConvert submission...`);
-          result = await sendToMediaConvert(file.downloadurl, file.filename);
+          result = await sendToMediaConvert(file.downloadurl, file.filename, presetName);
           // Store MediaConvert job in database
           await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
           console.log(`✅ MediaConvert job stored: ${result.id}`);
@@ -639,13 +641,15 @@ async function cleanupS3Staging(stagingKey) {
 
 /**
  * Submit video to AWS MediaConvert for transcoding with LUT color grading
- * Stages file to S3 first to avoid SSL certificate issues with direct Filemail URLs
+ * Stages file to S3 first to avoid SSL certificate issues with Filemail URLs
+ * Optionally uses a preset for output configuration
  */
-async function sendToMediaConvert(downloadUrl, filename) {
+async function sendToMediaConvert(downloadUrl, filename, presetName = "default") {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`📡 MEDIACONVERT SUBMISSION START`);
   console.log(`${'='.repeat(60)}`);
   console.log(`File: ${filename}`);
+  console.log(`Preset: ${presetName}`);
   console.log(`URL: ${downloadUrl.substring(0, 100)}...`);
   
   if (!mediaConvertClient) {
@@ -662,6 +666,30 @@ async function sendToMediaConvert(downloadUrl, filename) {
   let stagingInfo = null;
   
   try {
+    // Load preset
+    let preset = await loadMediaConvertPreset(presetName);
+    if (!preset) {
+      console.warn(`⚠️  Preset not found: ${presetName}, using defaults`);
+      // Use inline defaults if preset not found
+      preset = {
+        videoCodec: "H_264",
+        width: 1920,
+        height: 1080,
+        framerateNumerator: 30,
+        framerateDenominator: 1,
+        rateControlMode: "QVBR",
+        maxBitrate: 8000000,
+        gopSize: 30,
+        subGopLength: 1,
+        timecodeInsertion: "PIC_TIMING_SEI",
+        colorConversion: "REC_709_TO_DCI_P3",
+        audioCodec: "AAC",
+        audioBitrate: 128000,
+        audioSampleRate: 48000,
+        container: "MP4"
+      };
+    }
+    
     // Stage file to S3 first (MediaConvert has SSL/TLS issues with Filemail URLs)
     console.log(`\n[Step 1/3] Starting S3 staging...`);
     stagingInfo = await stageFileToS3(downloadUrl, filename);
@@ -699,42 +727,42 @@ async function sendToMediaConvert(downloadUrl, filename) {
             {
               NameModifier: nameModifier,
               VideoDescription: {
-                Width: 1920,
-                Height: 1080,
+                Width: preset.width || 1920,
+                Height: preset.height || 1080,
                 CodecSettings: {
-                  Codec: "H_264",
+                  Codec: preset.videoCodec || "H_264",
                   H264Settings: {
-                    RateControlMode: "QVBR",
-                    MaxBitrate: 8000000,
+                    RateControlMode: preset.rateControlMode || "QVBR",
+                    MaxBitrate: preset.maxBitrate || 8000000,
                     // QVBR mode: do NOT specify Bitrate (only MaxBitrate)
-                    FramerateDenominator: 1,
-                    FramerateNumerator: 30,
-                    GopSize: 30,
-                    SubGopLength: 1
+                    FramerateDenominator: preset.framerateDenominator || 1,
+                    FramerateNumerator: preset.framerateNumerator || 30,
+                    GopSize: preset.gopSize || 30,
+                    SubGopLength: preset.subGopLength || 1
                   }
                 },
-                // Apply DCI-P3 color space conversion (professional color grading)
+                // Apply color space conversion from preset
                 ...(lutS3Path && {
-                  ColorConversion: "REC_709_TO_DCI_P3"
+                  ColorConversion: preset.colorConversion || "REC_709_TO_DCI_P3"
                 }),
                 // Preserve timecode from source in container
-                TimecodeInsertion: "PIC_TIMING_SEI"
+                TimecodeInsertion: preset.timecodeInsertion || "PIC_TIMING_SEI"
               },
               AudioDescriptions: [
                 {
                   AudioSourceName: "Audio Selector 1",
                   CodecSettings: {
-                    Codec: "AAC",
+                    Codec: preset.audioCodec || "AAC",
                     AacSettings: {
-                      Bitrate: 128000,
+                      Bitrate: preset.audioBitrate || 128000,
                       CodingMode: "CODING_MODE_2_0",
-                      SampleRate: 48000
+                      SampleRate: preset.audioSampleRate || 48000
                     }
                   }
                 }
               ],
               ContainerSettings: {
-                Container: "MP4",
+                Container: preset.container || "MP4",
                 Mp4Settings: {
                   CslgAtom: "INCLUDE",
                   FreeSpaceBox: "EXCLUDE",
@@ -1554,7 +1582,10 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
 app.post("/process/transfer/:transferId", async (req, res) => {
   try {
     const { transferId } = req.params;
+    const { preset = "default" } = req.body; // Allow specifying preset
+    
     console.log(`\n📌 PROCESSING STARTED FOR TRANSFER: ${transferId}`);
+    console.log(`   Preset: ${preset}`);
     
     // Check if already processed
     if (await isTransferProcessed(transferId)) {
@@ -1569,13 +1600,14 @@ app.post("/process/transfer/:transferId", async (req, res) => {
     // Mark as processing to avoid duplicates
     await markTransferProcessed(transferId);
     
-    // Start processing
-    processFilemailTransfer(transferId);
+    // Start processing with selected preset
+    processFilemailTransfer(transferId, preset);
     
     res.json({ 
       success: true, 
       message: "Transfer processing started",
       transferId,
+      preset,
       timestamp: new Date().toISOString()
     });
   } catch (err) {
