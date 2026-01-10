@@ -2,7 +2,6 @@
 import fetch from "node-fetch";
 import express from "express";
 import dotenv from "dotenv";
-import coconut from "coconutjs";
 import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import fs from "fs";
@@ -27,15 +26,13 @@ if (!fs.existsSync(lutsDir)) {
 const PORT = process.env.PORT || 3000;
 const DEPLOYMENT_URL = process.env.DEPLOYMENT_URL || "https://postready-handling.fly.dev";
 const FILEMAIL_API_KEY = process.env.FILEMAIL_API_KEY || "";
-const COCONUT_API_KEY = process.env.COCONUT_API_KEY || "";
 const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || "";
 const CUBE_LUT_URL = process.env.CUBE_LUT_URL || "";
-const COCONUT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/coconut`;
 const MEDIACONVERT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/mediaconvert`;
 
-// MediaConvert settings
-const TRANSCODE_SERVICE = process.env.TRANSCODE_SERVICE || "coconut";  // "coconut" or "mediaconvert"
+// MediaConvert settings (only transcoding service)
+const TRANSCODE_SERVICE = "mediaconvert";
 const AWS_REGION = process.env.AWS_REGION || "us-east-1";
 const AWS_MEDIACONVERT_ROLE = process.env.AWS_MEDIACONVERT_ROLE || "";  // IAM role ARN for MediaConvert
 const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
@@ -203,7 +200,6 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 // Debug: Log loaded API keys on startup
 console.log("🔍 Checking environment variables on startup:");
 console.log(`   - FILEMAIL_API_KEY: ${FILEMAIL_API_KEY ? '✅ SET' : '❌ MISSING'}`);
-console.log(`   - COCONUT_API_KEY: ${COCONUT_API_KEY ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - FRAMEIO_TOKEN: ${FRAMEIO_TOKEN ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - FRAMEIO_PROJECT_ID: ${FRAMEIO_PROJECT_ID ? '✅ SET' : '❌ MISSING'}`);
 console.log(`   - CUBE_LUT_URL: ${CUBE_LUT_URL ? '✅ SET (color grading enabled)' : '⚪ NOT SET (optional)'}`);
@@ -215,9 +211,6 @@ console.log(`   - AWS_MEDIACONVERT_ROLE: ${AWS_MEDIACONVERT_ROLE ? '✅ SET' : '
 
 if (!FILEMAIL_API_KEY) {
   console.warn("⚠️  WARNING: FILEMAIL_API_KEY is not set - make sure FLY_API_TOKEN is set in GitHub Secrets!");
-}
-if (!COCONUT_API_KEY) {
-  console.warn("⚠️  WARNING: COCONUT_API_KEY is not set!");
 }
 
 /**
@@ -330,31 +323,18 @@ async function processFilemailTransfer(transferId) {
       try {
         let result;
         
-        // Try MediaConvert first if available
-        if (mediaConvertClient) {
-          console.log(`🚀 Submitting to AWS MediaConvert (LUT + timecode in one job)`);
-          try {
-            console.log(`   Attempting MediaConvert submission...`);
-            result = await sendToMediaConvert(file.downloadurl, file.filename);
-            // Store MediaConvert job in database (same table, just different service marker)
-            await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
-            console.log(`✅ MediaConvert job stored: ${result.id}`);
-          } catch (mcErr) {
-            console.warn(`\n⚠️  MediaConvert FAILED:`);
-            console.warn(`   Error: ${mcErr.message}`);
-            console.warn(`   Stack: ${mcErr.stack}`);
-            console.warn(`   Falling back to Coconut...\n`);
-            // Fallback to Coconut
-            result = await sendToCoconut(file.downloadurl, file.filename);
-            await storeCoconutJob(result.id, transferId, file.filename);
-            console.log("Fallback Coconut job created:", result.id);
-          }
-        } else {
-          // Use Coconut directly
-          console.log(`🚀 Submitting to Coconut (direct from Filemail URL)`);
-          result = await sendToCoconut(file.downloadurl, file.filename);
-          await storeCoconutJob(result.id, transferId, file.filename);
-          console.log("Coconut job created:", result.id);
+        // Use MediaConvert only
+        console.log(`🚀 Submitting to AWS MediaConvert (DCI-P3 color + embedded timecode)`);
+        try {
+          console.log(`   Attempting MediaConvert submission...`);
+          result = await sendToMediaConvert(file.downloadurl, file.filename);
+          // Store MediaConvert job in database
+          await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
+          console.log(`✅ MediaConvert job stored: ${result.id}`);
+        } catch (mcErr) {
+          console.error(`\n❌ MediaConvert FAILED - NO FALLBACK`);
+          console.error(`   Error: ${mcErr.message}`);
+          throw mcErr;
         }
         
       } catch (err) {
