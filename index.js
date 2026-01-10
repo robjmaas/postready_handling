@@ -597,7 +597,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
           },
           Outputs: [
             {
-              NameModifier: safeFilename,
+              NameModifier: "_converted",
               VideoDescription: {
                 Width: 1920,
                 Height: 1080,
