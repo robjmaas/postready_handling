@@ -544,7 +544,9 @@ async function sendToMediaConvert(downloadUrl, filename) {
   }
 
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  console.log(`Safe filename: ${safeFilename}`);
+  // Remove extension for NameModifier (MediaConvert will add .mp4)
+  const nameModifier = safeFilename.replace(/\.\w+$/, "");
+  console.log(`Safe filename: ${safeFilename}, NameModifier: ${nameModifier}`);
   
   let stagingInfo = null;
   
@@ -584,7 +586,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
           },
           Outputs: [
             {
-              NameModifier: safeFilename,
+              NameModifier: nameModifier,
               VideoDescription: {
                 Width: 1920,
                 Height: 1080,
