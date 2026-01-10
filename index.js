@@ -576,8 +576,22 @@ async function sendToMediaConvert(downloadUrl, filename) {
     const fileInput = stagingInfo.s3Url;
     console.log(`Input for MediaConvert: ${fileInput}`);
     
+    // Check for LUT and upload to S3 if available
+    console.log(`\n[Step 2/3] Checking LUT configuration...`);
+    const lutUrl = await getLutUrl();
+    let lutS3Path = null;
+    if (lutUrl && lutUrl.length > 0) {
+      console.log(`LUT URL found, uploading to S3...`);
+      try {
+        lutS3Path = await downloadAndUploadLutToS3(lutUrl);
+        console.log(`✅ LUT uploaded to S3: ${lutS3Path}`);
+      } catch (err) {
+        console.warn(`⚠️  Failed to upload LUT: ${err.message}`);
+      }
+    }
+    
     // Build MediaConvert job
-    console.log(`\n[Step 2/3] Building MediaConvert job...`);
+    console.log(`\n[Step 3/3] Building MediaConvert job...`);
     const jobSettings = {
       OutputGroups: [
         {
@@ -607,7 +621,9 @@ async function sendToMediaConvert(downloadUrl, filename) {
                   }
                 },
                 // Apply DCI-P3 color space conversion (professional color grading)
-                ColorConversion: "REC_709_TO_DCI_P3",
+                ...(lutS3Path && {
+                  ColorConversion: "REC_709_TO_DCI_P3"
+                }),
                 // Preserve timecode from source in container
                 TimecodeInsertion: "FRAMESEQUENCE"
               },
@@ -659,7 +675,8 @@ async function sendToMediaConvert(downloadUrl, filename) {
       UserMetadata: {
         service: "mediaconvert",
         filename: safeFilename,
-        colorspace: "DCI-P3"
+        colorspace: "DCI-P3",
+        lutApplied: lutS3Path ? "yes" : "no"
       }
     };
 
@@ -678,6 +695,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
     console.log(`\n✅ MediaConvert job created: ${response.Job.Id}`);
     console.log(`   Status: ${response.Job.Status}`);
     console.log(`   🎨 Color grading: DCI-P3 (professional color space)`);
+    console.log(`   ${lutS3Path ? '✅ LUT: Applied from S3' : '⏭️  LUT: Not configured'}`);
     console.log(`   ⏱️  Timecode: EMBEDDED (preserved from source)`);
     console.log(`${'='.repeat(60)}\n`);
     
@@ -719,6 +737,39 @@ async function getLutUrl() {
     return setting?.value || CUBE_LUT_URL || "";
   } catch (err) {
     return CUBE_LUT_URL || "";
+  }
+}
+
+/**
+ * Download LUT from URL and upload to S3 for MediaConvert to use
+ */
+async function downloadAndUploadLutToS3(lutUrl) {
+  try {
+    // Download LUT to temporary file
+    const tempLutPath = `/tmp/lut_${Date.now()}.cube`;
+    await downloadFile(lutUrl, tempLutPath);
+    
+    // Read the file
+    const lutBuffer = fs.readFileSync(tempLutPath);
+    
+    // Upload to S3
+    const s3Key = "luts/color_grade.cube";
+    const uploadParams = {
+      Bucket: "postready-staging",
+      Key: s3Key,
+      Body: lutBuffer,
+      ContentType: "application/octet-stream"
+    };
+    
+    await awsS3Client.send(new PutObjectCommand(uploadParams));
+    
+    // Clean up temp file
+    fs.unlinkSync(tempLutPath);
+    
+    return `s3://postready-staging/${s3Key}`;
+  } catch (err) {
+    console.error(`Error uploading LUT to S3: ${err.message}`);
+    throw err;
   }
 }
 
