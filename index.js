@@ -2096,15 +2096,17 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
         });
         const listResult = await awsS3Client.send(listCommand);
         
-        // Find the file that matches our job (should have the nameModifier in it)
-        if (listResult.Contents) {
-          for (const obj of listResult.Contents) {
-            const key = obj.Key;
-            // Look for a file that contains our nameModifier and ends with .mp4
-            if (key.includes(nameModifier) && key.endsWith(fileExtension)) {
-              actualOutputKey = key.replace("outputs/", "");
-              break;
-            }
+        // Find the most recent file (ordered by modification time)
+        // This avoids matching old files with duplicate nameModifiers
+        if (listResult.Contents && listResult.Contents.length > 0) {
+          const sortedByTime = listResult.Contents
+            .filter(obj => obj.Key.endsWith(fileExtension))
+            .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
+          
+          if (sortedByTime.length > 0) {
+            // Get the most recently modified file
+            actualOutputKey = sortedByTime[0].Key.replace("outputs/", "");
+            console.log(`   📊 Found ${sortedByTime.length} output files, using most recent`);
           }
         }
       } catch (err) {
