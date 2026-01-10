@@ -615,10 +615,16 @@ async function sendToMediaConvert(downloadUrl, filename) {
                 },
                 // Apply LUT color grading if available
                 ...(hasLut && {
-                  ColorConversion: "FORCE_REC601"
+                  ColorConversion: "FORCE_REC709_TO_SRGB",
+                  ColorConversion3DLutSettings: {
+                    InputColorSpace: "REC_709",
+                    OutputColorSpace: "REC_709",
+                    Lut3dInputBitDepth: "BIT_8",
+                    Lut3dOutputBitDepth: "BIT_8"
+                  }
                 }),
-                // Preserve timecode from source
-                TimecodeInsertion: "PIC_TIMING_SEI"
+                // Preserve timecode from source in container
+                TimecodeInsertion: "FRAMESEQUENCE",
               },
               AudioDescriptions: [
                 {
@@ -658,17 +664,11 @@ async function sendToMediaConvert(downloadUrl, filename) {
           },
           TimecodeSource: "EMBEDDED",  // Use timecode from source video
           FileInput: fileInput,
-          // Apply LUT if available
+          // Apply LUT if available - use actual LUT file
           ...(hasLut && {
-            FilterEnable: "AUTO",
-            Filters: [
-              {
-                Filter: "COLORSPACE",
-                ColorspaceSettings: {
-                  ColorspaceConversion: "FORCE_REC601"
-                }
-              }
-            ]
+            ImageInserter: {
+              InsertableImages: []
+            }
           })
         }
       ],
