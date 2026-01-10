@@ -1375,95 +1375,8 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Find or create 'dailies' folder (cached in memory and database)
-    let dailiesFolderId = frameIODailiesFolderId;
-    
-    if (!dailiesFolderId) {
-      console.log(`   Step 2: Looking for 'dailies' folder...`);
-      
-      // Check if we have a stored dailies folder ID in database
-      const storedSettings = await db.get(
-        "SELECT value FROM settings WHERE key = ?",
-        ["frameio_dailies_folder_id"]
-      );
-      
-      if (storedSettings?.value) {
-        dailiesFolderId = storedSettings.value;
-        frameIODailiesFolderId = dailiesFolderId;
-        console.log(`   ✅ Using stored dailies folder ID from database: ${dailiesFolderId}`);
-      } else {
-        // Fetch root folder's children to find 'dailies'
-        console.log(`   Searching Frame.io for existing 'dailies' folder...`);
-        const childrenRes = await fetch(
-          `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-          {
-            method: "GET",
-            headers: {
-              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-              "Content-Type": "application/json"
-            }
-          }
-        );
-
-        if (childrenRes.ok) {
-          const children = await childrenRes.json();
-          const dailiesFolder = children.data?.find(child => child.name === 'dailies' && child.type === 'folder');
-          if (dailiesFolder) {
-            dailiesFolderId = dailiesFolder.id;
-            frameIODailiesFolderId = dailiesFolderId;  // Cache in memory
-            
-            // Store in database for persistence across restarts
-            await db.run(
-              "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-              ["frameio_dailies_folder_id", dailiesFolderId]
-            );
-            
-            console.log(`   ✅ Found existing 'dailies' folder: ${dailiesFolderId}`);
-          }
-        }
-
-        // If 'dailies' folder doesn't exist, create it
-        if (!dailiesFolderId) {
-          console.log(`   'dailies' folder not found, creating new one...`);
-          const createFolderRes = await fetch(
-            `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-            {
-              method: "POST",
-              headers: {
-                "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-                "Content-Type": "application/json"
-              },
-              body: JSON.stringify({
-                name: "dailies",
-                type: "folder"
-              })
-            }
-          );
-
-          if (createFolderRes.ok) {
-            const folderData = await createFolderRes.json();
-            dailiesFolderId = folderData.id;
-            frameIODailiesFolderId = dailiesFolderId;  // Cache in memory
-            
-            // Store in database for persistence across restarts
-            await db.run(
-              "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-              ["frameio_dailies_folder_id", dailiesFolderId]
-            );
-            
-            console.log(`   ✅ Created new 'dailies' folder: ${dailiesFolderId}`);
-          } else {
-            throw new Error(`Failed to create 'dailies' folder: ${createFolderRes.status}`);
-          }
-        }
-      }
-    } else {
-      console.log(`   Step 2: Using cached dailies folder ID: ${dailiesFolderId}`);
-    }
-
-    // Step 3: Create asset in 'dailies' folder with presigned URL as source
-    // videoUrl is already a presigned S3 URL, valid for 7 days
-    console.log(`   Step 3: Creating asset in 'dailies' folder...`);
+    // Step 2: Create asset directly in root folder (no subfolder)
+    console.log(`   Step 2: Creating asset in project root...`);
     console.log(`   Presigned S3 URL (first 100 chars): ${videoUrl.substring(0, 100)}...`);
     
     // Create asset with source pointing to presigned URL - Frame.io can access this
@@ -1479,7 +1392,7 @@ async function uploadToFrameIO(videoUrl, filename) {
     console.log(`   Request body: ${JSON.stringify(requestBody).substring(0, 200)}...`);
     
     const createRes = await fetch(
-      `https://api.frame.io/v2/assets/${dailiesFolderId}/children`,
+      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
       {
         method: "POST",
         headers: {
@@ -1500,7 +1413,7 @@ async function uploadToFrameIO(videoUrl, filename) {
     }
 
     const assetData = JSON.parse(createResponseText);
-    console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
+    console.log(`✅ Asset created in Frame.io root: ${assetData.id}`);
     console.log(`   Frame.io will download and process the video from presigned S3 URL`);
     
     return assetData;
