@@ -2,6 +2,89 @@
 
 Output presets are reusable MediaConvert configurations stored in S3 that include timecode settings, color grading (LUT), and codec parameters. Presets eliminate the need to specify encoding settings for each job.
 
+## Quick Start: Using Custom Presets
+
+### 1. Create a Custom Preset
+
+```bash
+curl -X POST https://postready-handling.fly.dev/api/presets \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "web-hd",
+    "config": {
+      "name": "web-hd",
+      "description": "Web streaming optimized",
+      "videoCodec": "H_264",
+      "width": 1280,
+      "height": 720,
+      "framerateNumerator": 24,
+      "framerateDenominator": 1,
+      "rateControlMode": "QVBR",
+      "maxBitrate": 4000000,
+      "gopSize": 30,
+      "subGopLength": 1,
+      "timecodeInsertion": "PIC_TIMING_SEI",
+      "colorConversion": "REC_709_TO_DCI_P3",
+      "audioCodec": "AAC",
+      "audioBitrate": 128000,
+      "audioSampleRate": 48000,
+      "container": "MP4"
+    }
+  }'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "✅ Preset created",
+  "preset": {
+    "presetName": "web-hd",
+    "presetKey": "presets/web-hd.json",
+    "size": 460
+  }
+}
+```
+
+### 2. Process a Transfer with the Custom Preset
+
+```bash
+curl -X POST https://postready-handling.fly.dev/process/transfer/{transferId} \
+  -H "Content-Type: application/json" \
+  -d '{"preset": "web-hd"}'
+```
+
+Example with test transfer:
+```bash
+curl -X POST https://postready-handling.fly.dev/process/transfer/subxciltxymhjhl \
+  -H "Content-Type: application/json" \
+  -d '{"preset": "web-hd"}'
+```
+
+Response:
+```json
+{
+  "success": true,
+  "message": "Transfer processing started",
+  "transferId": "subxciltxymhjhl",
+  "preset": "web-hd",
+  "timestamp": "2026-01-10T09:10:00.000Z"
+}
+```
+
+### 3. Verify Processing with Custom Preset
+
+Check logs to see which preset was used:
+```bash
+flyctl logs -a postready-handling --no-tail 2>&1 | grep -E "Preset|Using preset"
+```
+
+Logs will show:
+```
+Using preset: web-hd
+Loaded preset: web-hd
+```
+
 ## API Endpoints
 
 ### List All Presets
