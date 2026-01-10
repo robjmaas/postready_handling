@@ -519,6 +519,103 @@ async function stageFileToS3(downloadUrl, filename) {
 }
 
 /**
+ * Create and store a MediaConvert output preset in S3
+ * Presets include timecode, color grading, and codec settings
+ */
+async function createMediaConvertPreset(presetName = "default", presetConfig = null) {
+  try {
+    const defaultPreset = {
+      name: presetName,
+      description: "MediaConvert preset with timecode, DCI-P3 color grading, and LUT support",
+      videoCodec: "H_264",
+      width: 1920,
+      height: 1080,
+      framerateNumerator: 30,
+      framerateDenominator: 1,
+      rateControlMode: "QVBR",
+      maxBitrate: 8000000,
+      gopSize: 30,
+      subGopLength: 1,
+      timecodeInsertion: "PIC_TIMING_SEI",
+      colorConversion: "REC_709_TO_DCI_P3",
+      audioCodec: "AAC",
+      audioBitrate: 128000,
+      audioSampleRate: 48000,
+      container: "MP4"
+    };
+
+    const finalConfig = presetConfig || defaultPreset;
+    
+    const presetKey = `presets/${presetName}.json`;
+    const presetJson = JSON.stringify(finalConfig, null, 2);
+    
+    await awsS3Client.send(new PutObjectCommand({
+      Bucket: "postready-staging",
+      Key: presetKey,
+      Body: presetJson,
+      ContentType: "application/json"
+    }));
+    
+    console.log(`✅ Preset stored: s3://postready-staging/${presetKey}`);
+    return { presetName, presetKey, size: presetJson.length };
+  } catch (err) {
+    console.error(`Error creating preset: ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * Load a MediaConvert preset from S3
+ */
+async function loadMediaConvertPreset(presetName = "default") {
+  try {
+    const presetKey = `presets/${presetName}.json`;
+    
+    const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+    const result = await awsS3Client.send(new GetObjectCommand({
+      Bucket: "postready-staging",
+      Key: presetKey
+    }));
+    
+    const presetJson = await result.Body.transformToString();
+    const preset = JSON.parse(presetJson);
+    
+    console.log(`✅ Loaded preset: ${presetName}`);
+    return preset;
+  } catch (err) {
+    console.warn(`Preset not found: ${presetName}, using defaults`);
+    return null;
+  }
+}
+
+/**
+ * List available MediaConvert presets from S3
+ */
+async function listMediaConvertPresets() {
+  try {
+    const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
+    const result = await awsS3Client.send(new ListObjectsV2Command({
+      Bucket: "postready-staging",
+      Prefix: "presets/"
+    }));
+    
+    const presets = (result.Contents || [])
+      .filter(obj => obj.Key.endsWith('.json'))
+      .map(obj => ({
+        name: obj.Key.replace('presets/', '').replace('.json', ''),
+        key: obj.Key,
+        size: obj.Size,
+        modified: obj.LastModified
+      }));
+    
+    return presets;
+  } catch (err) {
+    console.warn(`Error listing presets: ${err.message}`);
+    return [];
+  }
+}
+
+/**
  * Clean up AWS S3 staging file after MediaConvert processing is complete
  */
 async function cleanupS3Staging(stagingKey) {
