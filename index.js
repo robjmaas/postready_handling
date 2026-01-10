@@ -584,7 +584,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
           },
           Outputs: [
             {
-              NameModifier: "_converted",
+              NameModifier: safeFilename,
               VideoDescription: {
                 Width: 1920,
                 Height: 1080,
@@ -625,7 +625,8 @@ async function sendToMediaConvert(downloadUrl, filename) {
                 Mp4Settings: {
                   CslgAtom: "INCLUDE",
                   FreeSpaceBox: "EXCLUDE",
-                  MoovPlacement: "PROGRESSIVE_DOWNLOAD"
+                  MoovPlacement: "PROGRESSIVE_DOWNLOAD",
+                  TimecodeInsertion: "ENABLED"
                 }
               }
             }
