@@ -576,15 +576,8 @@ async function sendToMediaConvert(downloadUrl, filename) {
     const fileInput = stagingInfo.s3Url;
     console.log(`Input for MediaConvert: ${fileInput}`);
     
-    // Get LUT URL for color grading
-    console.log(`\n[Step 2/3] Checking LUT configuration...`);
-    const lutUrl = await getLutUrl();
-    const hasLut = lutUrl && lutUrl.length > 0;
-    console.log(`LUT configured: ${hasLut}`);
-    if (hasLut) console.log(`LUT URL: ${lutUrl.substring(0, 50)}...`);
-    
     // Build MediaConvert job
-    console.log(`\n[Step 3/3] Building MediaConvert job...`);
+    console.log(`\n[Step 2/3] Building MediaConvert job...`);
     const jobSettings = {
       OutputGroups: [
         {
@@ -613,18 +606,10 @@ async function sendToMediaConvert(downloadUrl, filename) {
                     SubGopLength: 1
                   }
                 },
-                // Apply LUT color grading if available
-                ...(hasLut && {
-                  ColorConversion: "FORCE_REC709_TO_SRGB",
-                  ColorConversion3DLutSettings: {
-                    InputColorSpace: "REC_709",
-                    OutputColorSpace: "REC_709",
-                    Lut3dInputBitDepth: "BIT_8",
-                    Lut3dOutputBitDepth: "BIT_8"
-                  }
-                }),
+                // Apply DCI-P3 color space conversion (professional color grading)
+                ColorConversion: "REC_709_TO_DCI_P3",
                 // Preserve timecode from source in container
-                TimecodeInsertion: "FRAMESEQUENCE",
+                TimecodeInsertion: "FRAMESEQUENCE"
               },
               AudioDescriptions: [
                 {
@@ -663,13 +648,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
             Rotate: "AUTO"
           },
           TimecodeSource: "EMBEDDED",  // Use timecode from source video
-          FileInput: fileInput,
-          // Apply LUT if available - use actual LUT file
-          ...(hasLut && {
-            ImageInserter: {
-              InsertableImages: []
-            }
-          })
+          FileInput: fileInput
         }
       ],
       TimecodeConfig: {
@@ -680,7 +659,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
       UserMetadata: {
         service: "mediaconvert",
         filename: safeFilename,
-        hasLut: hasLut.toString()
+        colorspace: "DCI-P3"
       }
     };
 
@@ -698,7 +677,8 @@ async function sendToMediaConvert(downloadUrl, filename) {
     
     console.log(`\n✅ MediaConvert job created: ${response.Job.Id}`);
     console.log(`   Status: ${response.Job.Status}`);
-    console.log(`   ${hasLut ? '🎨 LUT color grading enabled' : '⏭️  No LUT configured'}`);
+    console.log(`   🎨 Color grading: DCI-P3 (professional color space)`);
+    console.log(`   ⏱️  Timecode: EMBEDDED (preserved from source)`);
     console.log(`${'='.repeat(60)}\n`);
     
     return {
