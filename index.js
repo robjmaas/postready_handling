@@ -605,7 +605,7 @@ async function sendToMediaConvert(downloadUrl, filename) {
                   ColorConversion: "REC_709_TO_DCI_P3"
                 }),
                 // Preserve timecode from source in container
-                TimecodeInsertion: "FRAMESEQUENCE"
+                TimecodeInsertion: "PIC_TIMING_SEI"
               },
               AudioDescriptions: [
                 {
