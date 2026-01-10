@@ -785,12 +785,12 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
             // Preserve all video properties
             Rotate: "AUTO"
           },
-          TimecodeSource: "EMBEDDED",  // Use timecode from source video
+          TimecodeSource: preset.timecodeSource || "EMBEDDED",  // Use timecode from source video per preset
           FileInput: fileInput
         }
       ],
       TimecodeConfig: {
-        Source: "EMBEDDED"  // Use embedded timecode from source
+        Source: preset.timecodeSource || "EMBEDDED"  // Use preset timecode source - will preserve source timecode
       },
       // Webhook for job completion
       StatusUpdateInterval: "SECONDS_30",
