@@ -1068,7 +1068,7 @@ async function uploadToWasabi(localFilePath, s3Key) {
     });
     
     console.log(`   Sending to S3...`);
-    await awsS3Client.send(command);
+    await s3Client.send(command);
     console.log(`   ✅ S3 upload complete`);
     
     const wasabiUrl = `https://s3.eu-central-1.wasabisys.com/strawberries/${s3Key}`;
@@ -2063,46 +2063,70 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
         return res.status(200).json({ success: false, status: "failed", jobId, error: "Missing output/destination" });
       }
 
-      // Build the full S3 path: destination + nameModifier + .mp4
+      // Get the actual output filename from MediaConvert job details
+      // Since MediaConvert may modify the NameModifier with timestamps, we need to list S3 and find it
       const nameModifier = output.NameModifier || "";
       const container = output.ContainerSettings?.Container || "MP4";
       const fileExtension = container === "MP4" ? ".mp4" : ".mov";
-      const outputKey = nameModifier + fileExtension;
-      const outputPath = destination.endsWith("/") ? destination + outputKey : destination + "/" + outputKey;
       
       console.log(`   Destination: ${destination}`);
       console.log(`   NameModifier: ${nameModifier}`);
-      console.log(`   Full output path: ${outputPath}`);
-      console.log(`   Output key (for S3): ${outputKey}`);
       
-      // Verify file exists in S3 before generating signed URL
+      // List objects in outputs folder to find the actual file
+      let actualOutputKey = null;
       try {
-        const headCommand = new HeadBucketCommand({ Bucket: "postready-staging" });
-        await awsS3Client.send(headCommand);
+        const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
+        const listCommand = new ListObjectsV2Command({
+          Bucket: "postready-staging",
+          Prefix: "outputs/"
+        });
+        const listResult = await awsS3Client.send(listCommand);
         
-        // Check if the output file exists
+        // Find the file that matches our job (should have the nameModifier in it)
+        if (listResult.Contents) {
+          for (const obj of listResult.Contents) {
+            const key = obj.Key;
+            // Look for a file that contains our nameModifier and ends with .mp4
+            if (key.includes(nameModifier) && key.endsWith(fileExtension)) {
+              actualOutputKey = key.replace("outputs/", "");
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`Error listing S3 objects: ${err.message}`);
+      }
+      
+      if (!actualOutputKey) {
+        console.error(`❌ Could not find output file matching: ${nameModifier}${fileExtension}`);
+        return res.status(200).json({ success: false, status: "processing", jobId, error: "Output file not found in S3" });
+      }
+      
+      const outputPath = `s3://postready-staging/outputs/${actualOutputKey}`;
+      console.log(`   ✅ Found output file: ${actualOutputKey}`);
+      console.log(`   Full S3 path: ${outputPath}`);
+      
+      // Verify file size
+      try {
         const headObject = await awsS3Client.send(new HeadObjectCommand({
           Bucket: "postready-staging",
-          Key: `outputs/${outputKey}`
+          Key: `outputs/${actualOutputKey}`
         }));
-        console.log(`   ✅ File exists in S3: outputs/${outputKey}`);
         console.log(`   File size: ${(headObject.ContentLength / 1024 / 1024).toFixed(2)} MB`);
       } catch (err) {
-        console.error(`❌ File NOT found in S3: outputs/${outputKey}`);
-        console.error(`   Error: ${err.message}`);
-        console.error(`   MediaConvert may not have written the file yet`);
-        return res.status(200).json({ success: false, status: "processing", jobId, error: "Output file not yet available in S3" });
+        console.error(`❌ Error getting file details: ${err.message}`);
+        return res.status(200).json({ success: false, status: "processing", jobId, error: "Could not verify output file" });
       }
       
       // Get signed URL for Frame.io
-      const signedUrl = await getSignedS3Url(outputKey);
+      const signedUrl = await getSignedS3Url(actualOutputKey);
       console.log(`✅ Generated signed S3 URL for Frame.io`);
       
       // Update job in database with AWS S3 URL
       await updateCoconutJob(jobId, "completed", outputPath);
       
       // Upload to Frame.io using signed URL
-      uploadToFrameIO(signedUrl, outputKey)
+      uploadToFrameIO(signedUrl, actualOutputKey)
         .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
       
       return res.status(200).json({ 
