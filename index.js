@@ -2207,12 +2207,18 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
       // List objects in outputs folder to find the actual file
       let actualOutputKey = null;
       try {
-        const { ListObjectsV2Command } = await import("@aws-sdk/client-s3");
+        console.log(`   🔄 About to list S3 outputs folder...`);
         const listCommand = new ListObjectsV2Command({
           Bucket: "postready-staging",
           Prefix: "outputs/"
         });
+        console.log(`   📡 ListObjectsV2Command created, sending to S3...`);
         const listResult = await awsS3Client.send(listCommand);
+        console.log(`   ✅ ListObjectsV2 succeeded, result:`, JSON.stringify({
+          ContentsCount: listResult.Contents?.length || 0,
+          IsTruncated: listResult.IsTruncated,
+          ContinuationToken: !!listResult.ContinuationToken
+        }));
         
         console.log(`   📂 S3 outputs folder contents:`);
         if (listResult.Contents && listResult.Contents.length > 0) {
@@ -2239,7 +2245,8 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
           console.warn(`   ⚠️  outputs folder is empty!`);
         }
       } catch (err) {
-        console.error(`Error listing S3 objects: ${err.message}`);
+        console.error(`❌ Error listing S3 objects:`, err.message);
+        console.error(`   Full error:`, err);
       }
       
       if (!actualOutputKey) {
