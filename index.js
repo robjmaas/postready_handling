@@ -791,8 +791,7 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
       ],
       TimecodeConfig: {
         Source: preset.timecodeSource || "EMBEDDED",  // Use preset timecode source - will preserve source timecode
-        Start: "00:00:00:00",  // Fallback start timecode if source doesn't have one
-        TimestampOffset: "00:00:00:00"  // Don't offset the timecode
+        Start: "00:00:00:00"  // Fallback start timecode if source doesn't have one
       },
       // Webhook for job completion
       StatusUpdateInterval: "SECONDS_30",
