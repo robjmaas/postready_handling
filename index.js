@@ -758,7 +758,7 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
                   VideoPreprocessors: {
                     TimecodeBurnin: {
                       Position: preset.timecodeBurnin,
-                      FontSize: "LARGE",
+                      FontSize: 32,
                       Opacity: 100
                     }
                   }
