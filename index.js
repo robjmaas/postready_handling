@@ -724,6 +724,18 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     console.log(`   Input file: ${fileInput}`);
     console.log(`   Output destination: s3://postready-staging/outputs/`);
     console.log(`   Output name modifier: ${nameModifier}`);
+    
+    // Determine output extension based on container
+    const containerExtensionMap = {
+      "MP4": ".mp4",
+      "MOV": ".mov",
+      "MXF": ".mxf",
+      "MPEG2": ".m2v"
+    };
+    const outputExtension = containerExtensionMap[preset.container] || ".mp4";
+    const outputNameModifier = `${nameModifier}${outputExtension}`;
+    console.log(`   Output extension: ${outputExtension}`);
+    
     const jobSettings = {
       OutputGroups: [
         {
@@ -736,7 +748,7 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
           },
           Outputs: [
             {
-              NameModifier: nameModifier,
+              NameModifier: outputNameModifier,
               VideoDescription: {
                 Width: preset.width || 1920,
                 Height: preset.height || 1080,
