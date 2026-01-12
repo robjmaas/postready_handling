@@ -39,12 +39,14 @@ const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
 const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
 
 // AWS S3 client (for MediaConvert staging and output)
+// Note: postready-staging bucket is actually in Wasabi S3, so we use the Wasabi endpoint
 const awsS3Client = new S3Client({
   region: AWS_REGION,
   credentials: {
     accessKeyId: AWS_ACCESS_KEY_ID,
     secretAccessKey: AWS_SECRET_ACCESS_KEY
-  }
+  },
+  endpoint: "https://s3.eu-central-1.wasabisys.com"  // Wasabi S3 endpoint for postready-staging bucket
 });
 
 // Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
@@ -2415,7 +2417,8 @@ async function pollPendingMediaConvertJobs() {
                   credentials: {
                     accessKeyId: AWS_ACCESS_KEY_ID,
                     secretAccessKey: AWS_SECRET_ACCESS_KEY
-                  }
+                  },
+                  endpoint: "https://s3.eu-central-1.wasabisys.com"  // Wasabi endpoint
                 });
                 
                 const getCommand = new GetObjectCommand({
