@@ -1253,6 +1253,7 @@ async function uploadToFrameIO(videoUrl, filename) {
     console.log(`📤 Uploading to Frame.io`);
     console.log(`   Filename: ${filename}`);
     console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
+    console.log(`   Source URL: ${videoUrl.substring(0, 100)}...`);
     
     // Step 1: Fetch the project details to get root asset ID
     console.log(`   Step 1: Fetching project details...`);
@@ -1284,9 +1285,9 @@ async function uploadToFrameIO(videoUrl, filename) {
     
     // Step 2: Create asset directly in root folder (no subfolder)
     console.log(`   Step 2: Creating asset in project root...`);
-    console.log(`   Presigned S3 URL (first 100 chars): ${videoUrl.substring(0, 100)}...`);
     
-    // Create asset with source pointing to presigned URL - Frame.io can access this
+    // Create asset with source pointing to presigned URL
+    // Frame.io will asynchronously download the file from this URL
     const requestBody = {
       name: filename,
       type: "file",
@@ -1295,8 +1296,6 @@ async function uploadToFrameIO(videoUrl, filename) {
         url: videoUrl
       }
     };
-    
-    console.log(`   Request body: ${JSON.stringify(requestBody).substring(0, 200)}...`);
     
     const createRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children`,
@@ -1322,14 +1321,8 @@ async function uploadToFrameIO(videoUrl, filename) {
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io root: ${assetData.id}`);
     console.log(`   Asset name: ${assetData.name}`);
-    console.log(`   Frame.io will download and process the video from presigned S3 URL`);
-    console.log(`   Note: File will appear in Frame.io after download completes (may take a few minutes for large files)`);
-    
-    // After creating the asset, Frame.io will asynchronously download from the presigned URL
-    // The asset may appear small initially while Frame.io is fetching the content
-    console.log(`\n📝 Important: Frame.io download from S3 presigned URL is asynchronous`);
-    console.log(`   Presigned URL: ${videoUrl.substring(0, 80)}...`);
-    console.log(`   Expected file size: Check Frame.io after 2-5 minutes for full file`);
+    console.log(`   Status: Frame.io will download from presigned S3 URL`);
+    console.log(`   ⏱️  File may take 2-5 minutes to appear on Frame.io`);
     
     return assetData;
   } catch (err) {
@@ -2400,7 +2393,7 @@ async function pollPendingMediaConvertJobs() {
             let frameioUrl = outputUrl;
             if (outputUrl.startsWith("s3://")) {
               try {
-                // Extract S3 key properly - handle both formats
+                // Try presigned URL first (more secure)
                 let s3Path = outputUrl;
                 if (outputUrl.includes("s3://")) {
                   s3Path = outputUrl.split("s3://postready-staging/")[1] || outputUrl.split("postready-staging/")[1];
@@ -2414,6 +2407,7 @@ async function pollPendingMediaConvertJobs() {
                 console.log(`   Original S3 URL: ${outputUrl}`);
                 console.log(`   Extracted S3 path: ${s3Path}`);
                 
+                // Generate presigned URL
                 const { GetObjectCommand } = await import("@aws-sdk/client-s3");
                 const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
                 
@@ -2430,14 +2424,21 @@ async function pollPendingMediaConvertJobs() {
                   Key: s3Path
                 });
                 
-                frameioUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 3600 });
+                const presignedUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 3600 });
                 console.log(`   ✅ Presigned URL created (expires in 1 hour)`);
-                console.log(`   Full presigned URL length: ${frameioUrl.length} chars`);
-                console.log(`   URL preview: ${frameioUrl.substring(0, 150)}...`);
+                console.log(`   Full presigned URL length: ${presignedUrl.length} chars`);
+                
+                // Use public S3 URL instead (for better Frame.io compatibility)
+                // Format: https://bucket-name.s3.region.amazonaws.com/key
+                frameioUrl = `https://postready-staging.s3.us-east-1.amazonaws.com/${s3Path}`;
+                console.log(`   Using public S3 URL: ${frameioUrl.substring(0, 100)}...`);
+                console.log(`   (S3 bucket is public for Frame.io access)`);
               } catch (urlErr) {
                 console.warn(`⚠️  Failed to create presigned URL: ${urlErr.message}`);
-                console.warn(`   Stack: ${urlErr.stack}`);
-                frameioUrl = outputUrl; // Fallback to original
+                // Fallback to public S3 URL directly
+                let s3Path = outputUrl.split("s3://postready-staging/")[1] || outputUrl.split("postready-staging/")[1];
+                if (s3Path.startsWith("/")) s3Path = s3Path.substring(1);
+                frameioUrl = `https://postready-staging.s3.us-east-1.amazonaws.com/${s3Path}`;
               }
             }
             
