@@ -638,6 +638,9 @@ const POSTREADY_TEMPLATE = {
             "VideoDescription": {
               "Width": 1280,
               "Height": 720,
+              "ColorCorrector": {
+                "Lut3d": "s3://postready-staging/Awsome1.cube"
+              },
               "VideoPreprocessors": {
                 "TimecodeBurnin": {
                   "FontSize": 32,
