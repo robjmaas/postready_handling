@@ -639,7 +639,8 @@ const POSTREADY_TEMPLATE = {
               "Width": 1280,
               "Height": 720,
               "ColorCorrector": {
-                "Lut3d": "s3://postready-staging/Awsome1.cube"
+                "Lut3d": "s3://postready-staging/Awsome1.cube",
+                "Lut3dByteOrder": "AUTO"
               },
               "VideoPreprocessors": {
                 "TimecodeBurnin": {
