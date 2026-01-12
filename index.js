@@ -686,7 +686,9 @@ const POSTREADY_TEMPLATE = {
     "TimecodeConfig": {},
     "ColorConversion3DLUTSettings": [
       {
-        "FileInput": "s3://postready-staging/Awsome1.cube"
+        "FileInput": "s3://postready-staging/Awsome1.cube",
+        "InputColorSpace": "REC_709",
+        "OutputColorSpace": "DCI_P3"
       }
     ],
     "OutputGroups": [
@@ -939,7 +941,9 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
         TimecodeConfig: {},
         ColorConversion3DLUTSettings: [
           {
-            FileInput: "s3://postready-staging/Awsome1.cube"
+            FileInput: "s3://postready-staging/Awsome1.cube",
+            InputColorSpace: "REC_709",
+            OutputColorSpace: "DCI_P3"
           }
         ],
         OutputGroups: [
