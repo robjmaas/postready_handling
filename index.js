@@ -922,47 +922,72 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
   let stagingInfo = null;
   
   try {
-    // Verify job template exists
-    console.log(`\n[Step 1/2] Verifying job template: ${templateName}`);
-    const template = await getJobTemplate(templateName);
-    if (!template) {
-      throw new Error(`Job template not found: ${templateName}`);
-    }
-    console.log(`✅ Job template found: ${templateName}`);
-    console.log(`   Created: ${template.CreatedAt}`);
-    console.log(`   ARN: ${template.Arn}`);
-    
     // Stage file to S3
-    console.log(`\n[Step 2/2] Staging file to S3...`);
+    console.log(`\n[Step 1/2] Staging file to S3...`);
     stagingInfo = await stageFileToS3(downloadUrl, filename);
     console.log(`✅ S3 staging complete`);
     const fileInput = stagingInfo.s3Url;
     console.log(`   Input: ${fileInput}`);
     
-    // Create job from template with ColorCorrector override
-    console.log(`\nCreating MediaConvert job from template...`);
+    // Create job with full settings (not using template to ensure ColorCorrector is applied)
+    console.log(`\n[Step 2/2] Creating MediaConvert job with CUBE LUT color grading...`);
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
-      JobTemplate: templateName,
       Settings: {
+        TimecodeConfig: {},
         OutputGroups: [
           {
+            Name: "File Group",
+            Outputs: [
+              {
+                ContainerSettings: {
+                  Container: "MP4",
+                  Mp4Settings: {}
+                },
+                VideoDescription: {
+                  Width: 1280,
+                  Height: 720,
+                  ColorCorrector: {
+                    Lut3d: "s3://postready-staging/Awsome1.cube",
+                    Lut3dByteOrder: "AUTO"
+                  },
+                  VideoPreprocessors: {
+                    TimecodeBurnin: {
+                      FontSize: 32,
+                      Position: "TOP_LEFT"
+                    }
+                  },
+                  TimecodeInsertion: "PIC_TIMING_SEI",
+                  TimecodeTrack: "ENABLED",
+                  CodecSettings: {
+                    Codec: "H_264",
+                    H264Settings: {
+                      MaxBitrate: 2000000,
+                      RateControlMode: "QVBR",
+                      SceneChangeDetect: "TRANSITION_DETECTION"
+                    }
+                  }
+                },
+                AudioDescriptions: [
+                  {
+                    CodecSettings: {
+                      Codec: "AAC",
+                      AacSettings: {
+                        Bitrate: 96000,
+                        CodingMode: "CODING_MODE_2_0",
+                        SampleRate: 48000
+                      }
+                    }
+                  }
+                ]
+              }
+            ],
             OutputGroupSettings: {
               Type: "FILE_GROUP_SETTINGS",
               FileGroupSettings: {
                 Destination: "s3://postready-staging/outputs/"
               }
-            },
-            Outputs: [
-              {
-                VideoDescription: {
-                  ColorCorrector: {
-                    Lut3d: "s3://postready-staging/Awsome1.cube",
-                    Lut3dByteOrder: "AUTO"
-                  }
-                }
-              }
-            ]
+            }
           }
         ],
         Inputs: [
@@ -973,13 +998,16 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                 DefaultSelection: "DEFAULT"
               }
             },
-            VideoSelector: {
-              Rotate: "AUTO"
-            },
-            TimecodeSource: "EMBEDDED"
+            VideoSelector: {},
+            TimecodeSource: "ZEROBASED"
           }
         ]
-      }
+      },
+      AccelerationSettings: {
+        Mode: "DISABLED"
+      },
+      StatusUpdateInterval: "SECONDS_60",
+      Priority: 0
     });
 
     console.log(`Sending job creation request...`);
