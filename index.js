@@ -861,17 +861,21 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       JobTemplate: templateName,
-      Input: {
-        FileInput: fileInput,
-        AudioSelectors: {
-          "Audio Selector 1": {
-            DefaultSelection: "DEFAULT"
+      Settings: {
+        Inputs: [
+          {
+            FileInput: fileInput,
+            AudioSelectors: {
+              "Audio Selector 1": {
+                DefaultSelection: "DEFAULT"
+              }
+            },
+            VideoSelector: {
+              Rotate: "AUTO"
+            },
+            TimecodeSource: "EMBEDDED"
           }
-        },
-        VideoSelector: {
-          Rotate: "AUTO"
-        },
-        TimecodeSource: "EMBEDDED"
+        ]
       }
     });
 
