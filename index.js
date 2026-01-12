@@ -696,8 +696,7 @@ const POSTREADY_TEMPLATE = {
               "Width": 1280,
               "Height": 720,
               "ColorCorrector": {
-                "Lut3d": "s3://postready-staging/Awsome1.cube",
-                "Lut3dByteOrder": "AUTO"
+                "ColorSpaceConversion": "REC_709_TO_DCI_P3"
               },
               "VideoPreprocessors": {
                 "TimecodeBurnin": {
@@ -929,12 +928,19 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     const fileInput = stagingInfo.s3Url;
     console.log(`   Input: ${fileInput}`);
     
-    // Create job with full settings (not using template to ensure ColorCorrector is applied)
+    // Create job with full settings including 3D LUT at Job Settings level
     console.log(`\n[Step 2/2] Creating MediaConvert job with CUBE LUT color grading...`);
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       Settings: {
         TimecodeConfig: {},
+        GlobalProcessing: {
+          InputClipping: {},
+          ColorCorrectionConfig: {
+            Hdr10Metadata: {},
+            ColorSpaceConversion: "REC_709_TO_DCI_P3"
+          }
+        },
         OutputGroups: [
           {
             Name: "File Group",
@@ -948,8 +954,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                   Width: 1280,
                   Height: 720,
                   ColorCorrector: {
-                    Lut3d: "s3://postready-staging/Awsome1.cube",
-                    Lut3dByteOrder: "AUTO"
+                    ColorSpaceConversion: "REC_709_TO_DCI_P3"
                   },
                   VideoPreprocessors: {
                     TimecodeBurnin: {
