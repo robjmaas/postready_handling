@@ -12,7 +12,7 @@ import http from "http";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, CreateBucketCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
-import { MediaConvertClient, CreateJobCommand, GetJobCommand } from "@aws-sdk/client-mediaconvert";
+import { MediaConvertClient, CreateJobCommand, GetJobCommand, CreateJobTemplateCommand, DeleteJobTemplateCommand, ListJobTemplatesCommand, GetJobTemplateCommand } from "@aws-sdk/client-mediaconvert";
 
 dotenv.config({ quiet: true });   // <— no output
 
@@ -169,18 +169,13 @@ async function jobExists(transferId, filename) {
 await initDb();
 await testS3BucketAccess();
 
-// Initialize default MediaConvert preset
+// Initialize AWS Job Templates
 try {
-  const existingPresets = await listMediaConvertPresets();
-  if (existingPresets.length === 0) {
-    console.log("📋 Initializing default MediaConvert preset...");
-    await createMediaConvertPreset("default");
-    console.log("✅ Default preset created");
-  } else {
-    console.log(`✅ Found ${existingPresets.length} existing preset(s)`);
-  }
+  await initializePostreadyTemplate();
+  const templates = await listJobTemplates();
+  console.log(`✅ Found ${templates.length} AWS job template(s)`);
 } catch (err) {
-  console.warn(`⚠️  Could not initialize presets: ${err.message}`);
+  console.warn(`⚠️  Could not initialize job templates: ${err.message}`);
 }
 
 const app = express();
@@ -524,6 +519,186 @@ async function stageFileToS3(downloadUrl, filename) {
  * Create and store a MediaConvert output preset in S3
  * Presets include timecode, color grading, and codec settings
  */
+/**
+ * Create an AWS MediaConvert Job Template
+ */
+async function createJobTemplate(templateName, templateConfig) {
+  try {
+    const command = new CreateJobTemplateCommand({
+      Name: templateName,
+      Settings: templateConfig.Settings,
+      AccelerationSettings: templateConfig.AccelerationSettings || { Mode: "DISABLED" },
+      StatusUpdateInterval: templateConfig.StatusUpdateInterval || "SECONDS_60",
+      Priority: templateConfig.Priority || 0,
+      HopDestinations: templateConfig.HopDestinations || []
+    });
+
+    const response = await mediaConvertClient.send(command);
+    console.log(`✅ Job template created: ${templateName}`);
+    return response;
+  } catch (err) {
+    console.error(`Error creating job template: ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * List all AWS MediaConvert Job Templates
+ */
+async function listJobTemplates() {
+  try {
+    const command = new ListJobTemplatesCommand({});
+    const response = await mediaConvertClient.send(command);
+    
+    const templates = (response.JobTemplates || []).map(t => ({
+      name: t.Name,
+      arn: t.Arn,
+      createdAt: t.CreatedAt,
+      lastModified: t.LastModified,
+      category: t.Category
+    }));
+    
+    return templates;
+  } catch (err) {
+    console.warn(`Error listing job templates: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Get a specific AWS MediaConvert Job Template
+ */
+async function getJobTemplate(templateName) {
+  try {
+    const command = new GetJobTemplateCommand({
+      Name: templateName
+    });
+    const response = await mediaConvertClient.send(command);
+    console.log(`✅ Loaded job template: ${templateName}`);
+    return response.JobTemplate;
+  } catch (err) {
+    console.warn(`Job template not found: ${templateName}`);
+    return null;
+  }
+}
+
+/**
+ * Delete an AWS MediaConvert Job Template
+ */
+async function deleteJobTemplate(templateName) {
+  try {
+    const command = new DeleteJobTemplateCommand({
+      Name: templateName
+    });
+    const response = await mediaConvertClient.send(command);
+    console.log(`✅ Job template deleted: ${templateName}`);
+    return response;
+  } catch (err) {
+    console.error(`Error deleting job template: ${err.message}`);
+    throw err;
+  }
+}
+
+// Postready Job Template Configuration
+const POSTREADY_TEMPLATE = {
+  "Name": "Postready",
+  "Settings": {
+    "TimecodeConfig": {},
+    "OutputGroups": [
+      {
+        "Name": "File Group",
+        "Outputs": [
+          {
+            "ContainerSettings": {
+              "Container": "MP4",
+              "Mp4Settings": {}
+            },
+            "VideoDescription": {
+              "VideoPreprocessors": {
+                "TimecodeBurnin": {}
+              },
+              "TimecodeInsertion": "PIC_TIMING_SEI",
+              "TimecodeTrack": "ENABLED",
+              "CodecSettings": {
+                "Codec": "H_264",
+                "H264Settings": {
+                  "MaxBitrate": 7200,
+                  "RateControlMode": "QVBR",
+                  "SceneChangeDetect": "TRANSITION_DETECTION"
+                }
+              }
+            },
+            "AudioDescriptions": [
+              {
+                "CodecSettings": {
+                  "Codec": "AAC",
+                  "AacSettings": {
+                    "Bitrate": 96000,
+                    "CodingMode": "CODING_MODE_2_0",
+                    "SampleRate": 48000
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "OutputGroupSettings": {
+          "Type": "FILE_GROUP_SETTINGS",
+          "FileGroupSettings": {
+            "Destination": "s3://postready-staging/outputs/"
+          }
+        }
+      }
+    ],
+    "ColorConversion3DLUTSettings": [
+      {
+        "InputColorSpace": "REC_709",
+        "OutputColorSpace": "REC_709",
+        "FileInput": "s3://postready-staging/Awsome1.cube"
+      }
+    ],
+    "Inputs": [
+      {
+        "AudioSelectors": {
+          "Audio Selector 1": {
+            "DefaultSelection": "DEFAULT"
+          }
+        },
+        "VideoSelector": {},
+        "TimecodeSource": "ZEROBASED"
+      }
+    ]
+  },
+  "AccelerationSettings": {
+    "Mode": "DISABLED"
+  },
+  "StatusUpdateInterval": "SECONDS_60",
+  "Priority": 0,
+  "HopDestinations": []
+};
+
+/**
+ * Initialize Postready Job Template on startup
+ */
+async function initializePostreadyTemplate() {
+  try {
+    // Check if template exists
+    const existing = await getJobTemplate("Postready");
+    if (existing) {
+      console.log(`✅ Postready template already exists`);
+      return existing;
+    }
+    
+    // Create template if it doesn't exist
+    console.log(`📝 Creating Postready job template...`);
+    const result = await createJobTemplate("Postready", POSTREADY_TEMPLATE);
+    console.log(`✅ Postready template created successfully`);
+    return result;
+  } catch (err) {
+    console.error(`⚠️  Error initializing Postready template: ${err.message}`);
+  }
+}
+
 async function createMediaConvertPreset(presetName = "default", presetConfig = null) {
   try {
     const defaultPreset = {
@@ -2190,15 +2365,26 @@ async function getSignedS3Url(key) {
 /**
  * POST /api/presets - Create a new MediaConvert preset
  */
-app.post("/api/presets", async (req, res) => {
+/**
+ * POST /api/job-templates - Create a new job template
+ */
+app.post("/api/job-templates", async (req, res) => {
   try {
-    const { name = "default", config } = req.body;
+    const { name = "custom", config } = req.body;
     
-    const result = await createMediaConvertPreset(name, config);
+    if (!name || !config || !config.Settings) {
+      return res.status(400).json({ error: "name and config with Settings required" });
+    }
+    
+    const result = await createJobTemplate(name, config);
     res.json({
       success: true,
-      message: "✅ Preset created",
-      preset: result
+      message: `✅ Job template created: ${name}`,
+      template: {
+        name: result.JobTemplate?.Name,
+        arn: result.JobTemplate?.Arn,
+        createdAt: result.JobTemplate?.CreatedAt
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2206,15 +2392,15 @@ app.post("/api/presets", async (req, res) => {
 });
 
 /**
- * GET /api/presets - List all available presets
+ * GET /api/job-templates - List all available job templates
  */
-app.get("/api/presets", async (req, res) => {
+app.get("/api/job-templates", async (req, res) => {
   try {
-    const presets = await listMediaConvertPresets();
+    const templates = await listJobTemplates();
     res.json({
       success: true,
-      count: presets.length,
-      presets
+      count: templates.length,
+      templates
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2222,18 +2408,33 @@ app.get("/api/presets", async (req, res) => {
 });
 
 /**
- * GET /api/presets/:name - Get a specific preset
+ * GET /api/job-templates/:name - Get a specific job template
  */
-app.get("/api/presets/:name", async (req, res) => {
+app.get("/api/job-templates/:name", async (req, res) => {
   try {
-    const preset = await loadMediaConvertPreset(req.params.name);
-    if (!preset) {
-      return res.status(404).json({ error: "Preset not found" });
+    const template = await getJobTemplate(req.params.name);
+    if (!template) {
+      return res.status(404).json({ error: "Job template not found" });
     }
     res.json({
       success: true,
       name: req.params.name,
-      preset
+      template
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/job-templates/:name - Delete a job template
+ */
+app.delete("/api/job-templates/:name", async (req, res) => {
+  try {
+    await deleteJobTemplate(req.params.name);
+    res.json({
+      success: true,
+      message: `✅ Job template deleted: ${req.params.name}`
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2485,7 +2686,7 @@ async function pollPendingMediaConvertJobs() {
               if (listResult.Contents && listResult.Contents.length > 0) {
                 // Get the most recently modified file
                 const sortedByTime = listResult.Contents
-                  .filter(obj => /\.(mp4|mov|mxf|m2v|avi|mkv)$/i.test(obj.Key))
+                  .filter(obj => obj.Key.endsWith(".mp4"))
                   .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
                 
                 if (sortedByTime.length > 0) {
@@ -2493,7 +2694,7 @@ async function pollPendingMediaConvertJobs() {
                   const sizeInMB = (sortedByTime[0].Size / 1024 / 1024).toFixed(2);
                   console.log(`   📊 Most recent file: ${actualS3Key} (${sizeInMB} MB, modified: ${sortedByTime[0].LastModified})`);
                 } else {
-                  console.warn(`   ⚠️  No video files found in outputs/`);
+                  console.warn(`   ⚠️  No .mp4 files found in outputs/`);
                 }
               } else {
                 console.warn(`   ⚠️  outputs/ folder is empty!`);
