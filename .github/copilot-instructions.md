@@ -209,11 +209,16 @@ To apply a cube LUT (color grade) to all processed videos:
 
 - ✅ **Portal Filtering**: Only processes "Strawberries" portal transfers
 - ✅ **Video-Only**: Skips non-video files (docs, images, etc.)
-- ✅ **Deduplication**: Prevents duplicate Coconut job submission per file
+- ✅ **Deduplication**: Prevents duplicate job submission per file
 - ✅ **Manual Approval**: No auto-processing, explicit `/process` endpoint required
 - ✅ **Database Tracking**: SQLite persists all transfers and job statuses
-- ✅ **Webhook Handling**: Auto-uploads to Frame.io on Coconut completion
-- ✅ **Local-Only**: Server bound to 127.0.0.1, not publicly accessible
+- ✅ **Frame.io Integration**: Auto-uploads transcoded videos with clean filenames
+- ✅ **AWS MediaConvert**: Uses job templates for consistent output specs
+- ✅ **Timecode Support**: Embeds timecode in video + visual burnin overlay
+- ✅ **CUBE LUT Color Grading**: Applies professional color grading (REC_709 → DCI-P3)
+- ✅ **S3 Cleanup**: Removes temp prefixes from filenames before Frame.io upload
+- ✅ **LUT Verification**: Checks Awsome1.cube exists on startup, warns if missing
+- ✅ **Local-Only**: Server bound to 0.0.0.0:3000 for cloud deployment
 
 ### File Extensions Supported
 `.mp4` `.mov` `.avi` `.mkv` `.flv` `.wmv` `.webm` `.m4v` `.3gp` `.ogv` `.ts` `.m2ts` `.mts` `.vob` `.rm` `.rmvb` `.divx` `.xvid` `.mxf`
@@ -277,6 +282,25 @@ To add features:
 3. Follow existing error handling pattern: try/catch, return 200 on errors when appropriate
 4. Add descriptive console.log with emoji prefix
 5. Commit and push to trigger GitHub Actions deployment
+
+### Recent Fixes & Enhancements
+
+**Frame.io Filename Cleanup**
+- Removes S3 staging temp prefixes (`tmp_<prefix>_`) from filenames before uploading to Frame.io
+- Results in clean, readable filenames in Frame.io instead of `tmp_abc123_originalname.mp4`
+- Applied in webhook handler before Frame.io upload
+
+**LUT File Verification**
+- Checks on startup that `Awsome1.cube` exists in `s3://postready-staging/Awsome1.cube`
+- Logs file size if found
+- Warns if missing and notes videos will process without color grading
+- Prevents silent LUT failures during job execution
+
+**AWS Job Templates**
+- Switched from custom S3-stored presets to AWS MediaConvert Job Templates
+- Postready template includes: 1280×720, 2 Mbps QVBR, MP4, AAC 96kbps, timecode burnin, REC_709→DCI-P3 LUT
+- Templates managed via `/api/job-templates` endpoints
+- Auto-recreated on deployment to ensure latest settings
 
 ### When to Ask for Help
 

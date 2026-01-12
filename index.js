@@ -677,13 +677,6 @@ const POSTREADY_TEMPLATE = {
         }
       }
     ],
-    "ColorConversion3DLUTSettings": [
-      {
-        "InputColorSpace": "REC_709",
-        "OutputColorSpace": "P3DCI",
-        "FileInput": "s3://postready-staging/Awsome1.cube"
-      }
-    ],
     "Inputs": [
       {
         "AudioSelectors": {
