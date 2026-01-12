@@ -617,7 +617,11 @@ const POSTREADY_TEMPLATE = {
               "Width": 1280,
               "Height": 720,
               "VideoPreprocessors": {
-                "TimecodeBurnin": {}
+                "TimecodeBurnin": {
+                  "FontSize": 64,
+                  "Position": "TOP_CENTER",
+                  "Opacity": 100
+                }
               },
               "TimecodeInsertion": "PIC_TIMING_SEI",
               "TimecodeTrack": "ENABLED",
@@ -650,13 +654,6 @@ const POSTREADY_TEMPLATE = {
             "Destination": "s3://postready-staging/outputs/"
           }
         }
-      }
-    ],
-    "ColorConversion3DLUTSettings": [
-      {
-        "InputColorSpace": "REC_709",
-        "OutputColorSpace": "REC_709",
-        "FileInput": "s3://postready-staging/Awsome1.cube"
       }
     ],
     "Inputs": [
