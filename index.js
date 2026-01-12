@@ -691,7 +691,10 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     }
     console.log(`✅ Loaded preset: ${presetName}`);
     console.log(`   Resolution: ${preset.width}x${preset.height}`);
-    console.log(`   Video codec: ${preset.videoCodec}, Max bitrate: ${preset.maxBitrate}`);
+    const bitrateInfo = preset.rateControlMode === "CBR" 
+      ? `CBR ${(preset.bitrate / 1000).toFixed(1)} Mbps`
+      : `QVBR max ${(preset.maxBitrate / 1000000).toFixed(1)} Mbps`;
+    console.log(`   Video codec: ${preset.videoCodec}, ${bitrateInfo}`);
     console.log(`   Audio: ${preset.audioCodec} @ ${preset.audioBitrate} bps, ${preset.audioSampleRate} Hz`);
     console.log(`   Container: ${preset.container}`);
     console.log(`   Color space: ${preset.colorConversion}`);
@@ -741,8 +744,14 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
                   Codec: preset.videoCodec || "H_264",
                   H264Settings: {
                     RateControlMode: preset.rateControlMode || "QVBR",
-                    MaxBitrate: preset.maxBitrate || 8000000,
+                    ...(preset.rateControlMode === "CBR" && preset.bitrate && {
+                      Bitrate: preset.bitrate
+                    }),
+                    ...((preset.rateControlMode === "QVBR" || !preset.rateControlMode) && {
+                      MaxBitrate: preset.maxBitrate || 8000000
+                    }),
                     // QVBR mode: do NOT specify Bitrate (only MaxBitrate)
+                    // CBR mode: do NOT specify MaxBitrate (only Bitrate)
                     FramerateDenominator: preset.framerateDenominator || 1,
                     FramerateNumerator: preset.framerateNumerator || 30,
                     GopSize: preset.gopSize || 30,
@@ -779,12 +788,20 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
               ],
               ContainerSettings: {
                 Container: preset.container || "MP4",
-                Mp4Settings: {
-                  CslgAtom: "INCLUDE",
-                  FreeSpaceBox: "EXCLUDE",
-                  MoovPlacement: "PROGRESSIVE_DOWNLOAD",
-                  TimecodeInsertion: "ENABLED"
-                }
+                ...(preset.container === "MOV" && {
+                  MovSettings: {
+                    CslgAtom: "INCLUDE",
+                    Mpeg2FourCCControl: "USE_MPEG2"
+                  }
+                }),
+                ...((preset.container === "MP4" || !preset.container) && {
+                  Mp4Settings: {
+                    CslgAtom: "INCLUDE",
+                    FreeSpaceBox: "EXCLUDE",
+                    MoovPlacement: "PROGRESSIVE_DOWNLOAD",
+                    TimecodeInsertion: "ENABLED"
+                  }
+                })
               }
             }
           ]
