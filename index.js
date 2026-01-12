@@ -790,8 +790,7 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
                 Container: preset.container || "MP4",
                 ...(preset.container === "MOV" && {
                   MovSettings: {
-                    CslgAtom: "INCLUDE",
-                    Mpeg2FourCCControl: "USE_MPEG2"
+                    CslgAtom: "INCLUDE"
                   }
                 }),
                 ...((preset.container === "MP4" || !preset.container) && {
