@@ -2376,7 +2376,10 @@ async function pollPendingMediaConvertJobs() {
             // Check the actual file size in S3
             try {
               const s3Key = outputUrl.includes("outputs/") ? outputUrl.split("outputs/")[1] : outputUrl.split("postready-staging/")[1];
-              console.log(`   🔍 S3 HeadObject check: Bucket=postready-staging, Key=${s3Key}`);
+              console.log(`   🔍 S3 HeadObject check:`);
+              console.log(`       - Bucket: postready-staging`);
+              console.log(`       - Key: ${s3Key}`);
+              console.log(`       - Full URL: ${outputUrl}`);
               const headCommand = new HeadObjectCommand({
                 Bucket: "postready-staging",
                 Key: s3Key
@@ -2390,7 +2393,8 @@ async function pollPendingMediaConvertJobs() {
             } catch (sizeErr) {
               console.warn(`Could not check file size: ${sizeErr.message}`);
               console.warn(`   Error code: ${sizeErr.Code}`);
-              console.warn(`   This might indicate the file doesn't exist in S3 yet or credentials are invalid`);
+              console.warn(`   Error name: ${sizeErr.name}`);
+              console.warn(`   Full error:`, sizeErr);
             }
             
             // Convert S3 path to presigned HTTPS URL for Frame.io
