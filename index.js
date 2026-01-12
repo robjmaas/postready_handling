@@ -2037,12 +2037,14 @@ app.post("/webhooks/coconut", async (req, res) => {
     
     // If completed, check which service was used and handle accordingly
     if (status === "completed" && outputUrl) {
-      // Extract filename from the output URL or use job ID
-      const urlParts = outputUrl.split("/");
-      const filename = urlParts[urlParts.length - 1] || `${jobId}.mp4`;
-      
-      // Check if this is a MediaConvert job by looking at the filename marker
+      // Get the original filename from the database (not from the S3 URL which has temp prefix)
       const jobRow = await db.get("SELECT filename FROM coconut_jobs WHERE id = ?", [jobId]);
+      let originalFilename = jobRow?.filename || `${jobId}.mp4`;
+      
+      // Remove [MC] marker if present
+      originalFilename = originalFilename.replace(/^\[MC\]\s/, '');
+      
+      // Check if this is a MediaConvert job
       const isMediaConvertJob = jobRow?.filename?.startsWith("[MC]");
       
       if (isMediaConvertJob) {
@@ -2050,7 +2052,7 @@ app.post("/webhooks/coconut", async (req, res) => {
         console.log(`📤 Video is ready in Wasabi: ${outputUrl}`);
         
         // Go directly to Frame.io upload for MediaConvert jobs
-        uploadToFrameIO(outputUrl, filename.replace(/^\[MC\]\s/, ''))
+        uploadToFrameIO(outputUrl, originalFilename)
           .then((frameioResult) => {
             if (frameioResult) {
               console.log(`✅ Uploaded to Frame.io: ${frameioResult.id}`);
@@ -2065,14 +2067,14 @@ app.post("/webhooks/coconut", async (req, res) => {
         // For Coconut jobs, apply FFmpeg post-processing for LUT color grading
         console.log(`🎬 Coconut job detected - starting FFmpeg post-processing for LUT color grading`);
         
-        postProcessWithFFmpeg(outputUrl, outputUrl, filename)
+        postProcessWithFFmpeg(outputUrl, outputUrl, originalFilename)
           .then((processedUrl) => {
             console.log(`✅ Post-processing complete: ${processedUrl}`);
             console.log(`📤 Video is ready: ${processedUrl}`);
             
             // Try to upload to Frame.io after post-processing
             // This is non-blocking - video is already safely stored
-            uploadToFrameIO(processedUrl, filename)
+            uploadToFrameIO(processedUrl, originalFilename)
               .then((frameioResult) => {
                 if (frameioResult) {
                   console.log(`✅ Also uploaded to Frame.io: ${frameioResult.id}`);
