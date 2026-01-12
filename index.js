@@ -692,7 +692,7 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     console.log(`✅ Loaded preset: ${presetName}`);
     console.log(`   Resolution: ${preset.width}x${preset.height}`);
     const bitrateInfo = preset.rateControlMode === "CBR" 
-      ? `CBR ${(preset.bitrate / 1000).toFixed(1)} Mbps`
+      ? `CBR ${(preset.bitrate / 1000000).toFixed(1)} Mbps`
       : `QVBR max ${(preset.maxBitrate / 1000000).toFixed(1)} Mbps`;
     console.log(`   Video codec: ${preset.videoCodec}, ${bitrateInfo}`);
     console.log(`   Audio: ${preset.audioCodec} @ ${preset.audioBitrate} bps, ${preset.audioSampleRate} Hz`);
