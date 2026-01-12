@@ -2424,6 +2424,7 @@ async function pollPendingMediaConvertJobs() {
               const outputDetail = outputGroup.OutputDetails[0];
               if (outputDetail.OutputFilePaths && outputDetail.OutputFilePaths.length > 0) {
                 outputUrl = outputDetail.OutputFilePaths[0];
+                console.log(`   Found output via OutputGroupDetails: ${outputUrl}`);
               }
             }
           }
@@ -2437,21 +2438,35 @@ async function pollPendingMediaConvertJobs() {
               const outputSettings = outputGroup.Outputs?.[0];
               const nameModifier = outputSettings?.NameModifier || "output";
               outputUrl = `${destination}${nameModifier}.mp4`;
+              console.log(`   Found output via Settings: ${outputUrl}`);
             }
           }
 
           console.log(`   Response keys: ${Object.keys(mcJob).join(", ")}`);
           console.log(`   OutputGroupDetails: ${mcJob.OutputGroupDetails ? "✓" : "✗"}`);
           console.log(`   Settings.OutputGroups: ${mcJob.Settings?.OutputGroups ? "✓" : "✗"}`);
-
+          
+          // Debug: Show full output paths if they exist
+          if (mcJob.OutputGroupDetails?.[0]?.OutputDetails?.[0]) {
+            console.log(`   OutputDetail keys: ${Object.keys(mcJob.OutputGroupDetails[0].OutputDetails[0]).join(", ")}`);
+            console.log(`   Full OutputDetail: ${JSON.stringify(mcJob.OutputGroupDetails[0].OutputDetails[0]).substring(0, 300)}`);
+          }
           if (outputUrl) {
             console.log(`   Output: ${outputUrl}`);
+            console.log(`   Output URL type: ${outputUrl.startsWith("s3://") ? "S3 path" : "HTTPS URL"}`);
             
             // Convert S3 path to presigned HTTPS URL for Frame.io
             let frameioUrl = outputUrl;
             if (outputUrl.startsWith("s3://")) {
               try {
-                const s3Path = outputUrl.replace("s3://postready-staging/", "");
+                // Extract S3 key properly - handle both formats
+                let s3Path = outputUrl;
+                if (outputUrl.includes("s3://")) {
+                  s3Path = outputUrl.split("s3://postready-staging/")[1] || outputUrl.split("postready-staging/")[1];
+                }
+                
+                console.log(`   Extracted S3 path: ${s3Path}`);
+                
                 const { GetObjectCommand } = await import("@aws-sdk/client-s3");
                 const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
                 
@@ -2469,9 +2484,10 @@ async function pollPendingMediaConvertJobs() {
                 });
                 
                 frameioUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 3600 });
-                console.log(`   Presigned URL for Frame.io: ${frameioUrl.substring(0, 80)}...`);
+                console.log(`   ✅ Presigned URL created: ${frameioUrl.substring(0, 100)}...`);
               } catch (urlErr) {
                 console.warn(`⚠️  Failed to create presigned URL: ${urlErr.message}`);
+                console.warn(`   Stack: ${urlErr.stack}`);
                 frameioUrl = outputUrl; // Fallback to original
               }
             }
@@ -2480,6 +2496,7 @@ async function pollPendingMediaConvertJobs() {
             const originalFilename = job.filename.replace(/^\[MC\]\s/, '');
             console.log(`\n🎬 MediaConvert job detected - skipping FFmpeg (already has LUT + timecode)`);
             console.log(`📤 Video is ready in Wasabi: ${outputUrl}`);
+            console.log(`📎 Frame.io URL: ${frameioUrl.substring(0, 100)}...`);
 
             // Upload to Frame.io with presigned URL
             uploadToFrameIO(frameioUrl, originalFilename)
