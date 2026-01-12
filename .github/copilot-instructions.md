@@ -108,82 +108,6 @@ DELETE /db/clear
 ```
 ⚠️ Dangerous - clears all processed transfers and jobs
 
-#### Check AWS Permissions for LUT
-```bash
-GET /db/permissions
-```
-Verifies MediaConvert execution role has S3:GetObject access to the CUBE LUT file.
-Response includes required IAM policy if permissions are missing.
-
-Returns:
-```json
-{
-  "mediaConvertRole": "arn:aws:iam::...:role/...",
-  "cubeFile": {
-    "path": "s3://postready-staging/Awsome1.cube",
-    "exists": true,
-    "accessible": true
-  },
-  "requiredPolicy": {
-    "Effect": "Allow",
-    "Action": "s3:GetObject",
-    "Resource": "arn:aws:s3:::postready-staging/Awsome1.cube"
-  },
-  "status": "✅ Ready for LUT color grading"
-}
-```
-
-If permissions are missing, grant this policy to the MediaConvert execution role:
-```json
-{
-  "Effect": "Allow",
-  "Action": "s3:GetObject",
-  "Resource": "arn:aws:s3:::postready-staging/Awsome1.cube"
-}
-```
-
-Or grant broader S3 access:
-```json
-{
-  "Effect": "Allow",
-  "Action": ["s3:GetObject", "s3:ListBucket"],
-  "Resource": [
-    "arn:aws:s3:::postready-staging/*",
-    "arn:aws:s3:::postready-staging"
-  ]
-}
-```
-
-#### Get Current Cube LUT URL
-```bash
-GET /db/settings/lut
-```
-Returns current LUT URL and whether it's from database or environment variable.
-
-#### Update Cube LUT URL
-```bash
-PUT /db/settings/lut
-```
-Body: `{ "cube_lut_url": "https://example.com/lut.cube" }`
-Updates the LUT URL without restarting the server.
-
-Example:
-```bash
-curl -X PUT http://127.0.0.1:3000/db/settings/lut \
-  -H "Content-Type: application/json" \
-  -d '{"cube_lut_url": "https://example.com/new_color_grade.cube"}'
-```
-
-Response:
-```json
-{
-  "success": true,
-  "message": "🎨 Cube LUT URL updated",
-  "cube_lut_url": "https://example.com/new_color_grade.cube",
-  "note": "New LUT will be applied to videos processed after this update"
-}
-```
-
 #### Remove Cube LUT (Disable Color Grading)
 ```bash
 DELETE /db/settings/lut
@@ -246,9 +170,9 @@ To apply a cube LUT (color grade) to all processed videos:
 
 1. **Check Inbox**: `GET /inbox` → see pending Strawberries transfers
 2. **Preview**: `GET /preview/transfer/{id}` → review video files and count
-3. **Confirm**: `POST /process/transfer/{id}` → submit to Coconut
-4. **Wait**: Coconut transcodes and POSTs webhook when done
-5. **Auto-Upload**: Frame.io receives video from Wasabi via webhook
+3. **Confirm**: `POST /process/transfer/{id}` → submit to MediaConvert
+4. **Wait**: MediaConvert transcodes and POSTs webhook when done
+5. **Auto-Upload**: Frame.io receives video from S3 via webhook
 6. **Verify**: `GET /db/jobs/{transferId}` → check job status
 
 ### Key Features
@@ -259,14 +183,10 @@ To apply a cube LUT (color grade) to all processed videos:
 - ✅ **Manual Approval**: No auto-processing, explicit `/process` endpoint required
 - ✅ **Database Tracking**: SQLite persists all transfers and job statuses
 - ✅ **Frame.io Integration**: Auto-uploads transcoded videos with clean filenames
-- ✅ **AWS MediaConvert**: Uses job templates for consistent output specs
+- ✅ **AWS MediaConvert**: Direct job submission with full encoding control
+- ✅ **Color Grading**: REC.709 → DCI-P3 color space conversion for professional output
 - ✅ **Timecode Support**: Embeds timecode in video + visual burnin overlay
-- ✅ **CUBE LUT Color Grading**: Applies professional color grading (REC_709 → DCI-P3)
-  - Requires MediaConvert execution role to have `s3:GetObject` permission on `postready-staging/Awsome1.cube`
-  - Verify with: `GET /db/permissions`
 - ✅ **S3 Cleanup**: Removes temp prefixes from filenames before Frame.io upload
-- ✅ **LUT Verification**: Checks Awsome1.cube exists on startup, warns if missing
-- ✅ **IAM Permission Check**: Verifies MediaConvert role has S3 access to CUBE file on startup
 - ✅ **Local-Only**: Server bound to 0.0.0.0:3000 for cloud deployment
 
 ### File Extensions Supported
