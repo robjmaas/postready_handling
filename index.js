@@ -84,6 +84,27 @@ async function testS3BucketAccess() {
   }
 }
 
+/**
+ * Verify LUT file exists in S3
+ */
+async function verifyLUTFile() {
+  try {
+    const headCommand = new HeadObjectCommand({
+      Bucket: "postready-staging",
+      Key: "Awsome1.cube"
+    });
+    const result = await awsS3Client.send(headCommand);
+    const sizeMB = (result.ContentLength / 1024 / 1024).toFixed(2);
+    console.log(`✅ LUT file found: s3://postready-staging/Awsome1.cube (${sizeMB} MB)`);
+    return true;
+  } catch (err) {
+    console.warn(`⚠️  LUT file not found or not accessible: s3://postready-staging/Awsome1.cube`);
+    console.warn(`   Error: ${err.message}`);
+    console.warn(`   Videos will be processed without LUT color grading`);
+    return false;
+  }
+}
+
 /* ==================== DATABASE SETUP ==================== */
 let db;
 
@@ -168,6 +189,7 @@ async function jobExists(transferId, filename) {
 // Initialize database on startup
 await initDb();
 await testS3BucketAccess();
+await verifyLUTFile();
 
 // Initialize AWS Job Templates
 try {
