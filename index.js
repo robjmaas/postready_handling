@@ -95,7 +95,8 @@ async function verifyLUTFile() {
     });
     const result = await awsS3Client.send(headCommand);
     const sizeMB = (result.ContentLength / 1024 / 1024).toFixed(2);
-    console.log(`✅ LUT file found: s3://postready-staging/Awsome1.cube (${sizeMB} MB)`);
+    console.log(`✅ Awsome1.cube found in S3: ${sizeMB} MB`);
+    console.log(`   Color grading via ColorSpaceConversion: REC.709 → DCI-P3`);
     return true;
   } catch (err) {
     if (err.name === 'NoCredentialsError' || err.message?.includes('Unable to locate credentials')) {
@@ -696,9 +697,7 @@ const POSTREADY_TEMPLATE = {
               "Width": 1280,
               "Height": 720,
               "ColorCorrector": {
-                "ColorSpaceConversion": "REC_709_TO_DCI_P3",
-                "Lut3d": "https://postready-staging.s3.us-east-1.amazonaws.com/Awsome1.cube",
-                "Lut3dByteOrder": "AUTO"
+                "ColorSpaceConversion": "REC_709_TO_DCI_P3"
               },
               "VideoPreprocessors": {
                 "TimecodeBurnin": {
@@ -956,9 +955,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                   Width: 1280,
                   Height: 720,
                   ColorCorrector: {
-                    ColorSpaceConversion: "REC_709_TO_DCI_P3",
-                    Lut3d: "https://postready-staging.s3.us-east-1.amazonaws.com/Awsome1.cube",
-                    Lut3dByteOrder: "AUTO"
+                    ColorSpaceConversion: "REC_709_TO_DCI_P3"
                   },
                   VideoPreprocessors: {
                     TimecodeBurnin: {
@@ -1027,7 +1024,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     console.log(`   Status: ${response.Job.Status}`);
     console.log(`   Template: ${templateName}`);
     console.log(`   Output: s3://postready-staging/outputs/`);
-    console.log(`   🎨 LUT: s3://postready-staging/Awsome1.cube (ColorCorrector applied)`);
+    console.log(`   🎨 Color Grading: REC.709 → DCI-P3 (ColorSpaceConversion)`);
     console.log(`${'='.repeat(60)}\n`);
     
     return {
