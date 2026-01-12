@@ -684,6 +684,11 @@ const POSTREADY_TEMPLATE = {
   "Name": "Postready",
   "Settings": {
     "TimecodeConfig": {},
+    "ColorConversion3DLUTSettings": [
+      {
+        "FileInput": "s3://postready-staging/Awsome1.cube"
+      }
+    ],
     "OutputGroups": [
       {
         "Name": "File Group",
@@ -696,9 +701,6 @@ const POSTREADY_TEMPLATE = {
             "VideoDescription": {
               "Width": 1280,
               "Height": 720,
-              "ColorCorrector": {
-                "ColorSpaceConversion": "REC_709_TO_DCI_P3"
-              },
               "VideoPreprocessors": {
                 "TimecodeBurnin": {
                   "FontSize": 32,
@@ -929,19 +931,17 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     const fileInput = stagingInfo.s3Url;
     console.log(`   Input: ${fileInput}`);
     
-    // Create job with full settings including 3D LUT at Job Settings level
+    // Create job with 3D LUT at Settings level (correct structure)
     console.log(`\n[Step 2/2] Creating MediaConvert job with CUBE LUT color grading...`);
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       Settings: {
         TimecodeConfig: {},
-        GlobalProcessing: {
-          InputClipping: {},
-          ColorCorrectionConfig: {
-            Hdr10Metadata: {},
-            ColorSpaceConversion: "REC_709_TO_DCI_P3"
+        ColorConversion3DLUTSettings: [
+          {
+            FileInput: "s3://postready-staging/Awsome1.cube"
           }
-        },
+        ],
         OutputGroups: [
           {
             Name: "File Group",
@@ -954,9 +954,6 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                 VideoDescription: {
                   Width: 1280,
                   Height: 720,
-                  ColorCorrector: {
-                    ColorSpaceConversion: "REC_709_TO_DCI_P3"
-                  },
                   VideoPreprocessors: {
                     TimecodeBurnin: {
                       FontSize: 32,
@@ -1024,7 +1021,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     console.log(`   Status: ${response.Job.Status}`);
     console.log(`   Template: ${templateName}`);
     console.log(`   Output: s3://postready-staging/outputs/`);
-    console.log(`   🎨 Color Grading: REC.709 → DCI-P3 (ColorSpaceConversion)`);
+    console.log(`   🎨 3D LUT: s3://postready-staging/Awsome1.cube (ColorConversion3DLUTSettings)`);
     console.log(`${'='.repeat(60)}\n`);
     
     return {
