@@ -1321,7 +1321,15 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     const assetData = JSON.parse(createResponseText);
     console.log(`✅ Asset created in Frame.io root: ${assetData.id}`);
+    console.log(`   Asset name: ${assetData.name}`);
     console.log(`   Frame.io will download and process the video from presigned S3 URL`);
+    console.log(`   Note: File will appear in Frame.io after download completes (may take a few minutes for large files)`);
+    
+    // After creating the asset, Frame.io will asynchronously download from the presigned URL
+    // The asset may appear small initially while Frame.io is fetching the content
+    console.log(`\n📝 Important: Frame.io download from S3 presigned URL is asynchronous`);
+    console.log(`   Presigned URL: ${videoUrl.substring(0, 80)}...`);
+    console.log(`   Expected file size: Check Frame.io after 2-5 minutes for full file`);
     
     return assetData;
   } catch (err) {
@@ -2398,6 +2406,12 @@ async function pollPendingMediaConvertJobs() {
                   s3Path = outputUrl.split("s3://postready-staging/")[1] || outputUrl.split("postready-staging/")[1];
                 }
                 
+                // Remove leading slash if present
+                if (s3Path.startsWith("/")) {
+                  s3Path = s3Path.substring(1);
+                }
+                
+                console.log(`   Original S3 URL: ${outputUrl}`);
                 console.log(`   Extracted S3 path: ${s3Path}`);
                 
                 const { GetObjectCommand } = await import("@aws-sdk/client-s3");
@@ -2417,7 +2431,9 @@ async function pollPendingMediaConvertJobs() {
                 });
                 
                 frameioUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 3600 });
-                console.log(`   ✅ Presigned URL created: ${frameioUrl.substring(0, 100)}...`);
+                console.log(`   ✅ Presigned URL created (expires in 1 hour)`);
+                console.log(`   Full presigned URL length: ${frameioUrl.length} chars`);
+                console.log(`   URL preview: ${frameioUrl.substring(0, 150)}...`);
               } catch (urlErr) {
                 console.warn(`⚠️  Failed to create presigned URL: ${urlErr.message}`);
                 console.warn(`   Stack: ${urlErr.stack}`);
