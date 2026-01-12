@@ -702,13 +702,16 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     const lutUrl = await getLutUrl();
     let lutS3Path = null;
     if (lutUrl && lutUrl.length > 0) {
-      console.log(`LUT URL found, uploading to S3...`);
+      console.log(`LUT URL found: ${lutUrl}`);
+      console.log(`   Downloading and uploading to S3...`);
       try {
         lutS3Path = await downloadAndUploadLutToS3(lutUrl);
-        console.log(`✅ LUT uploaded to S3: ${lutS3Path}`);
+        console.log(`✅ LUT processing complete`);
       } catch (err) {
-        console.warn(`⚠️  Failed to upload LUT: ${err.message}`);
+        console.warn(`⚠️  Failed to process LUT: ${err.message}`);
       }
+    } else {
+      console.log(`No LUT configured, skipping color grading`);
     }
     
     // Build MediaConvert job
@@ -881,9 +884,32 @@ async function downloadAndUploadLutToS3(lutUrl) {
     
     // Read the file
     const lutBuffer = fs.readFileSync(tempLutPath);
+    console.log(`   📊 File size: ${(lutBuffer.length / (1024 * 1024)).toFixed(2)} MB`);
+    
+    if (lutBuffer.length === 0) {
+      throw new Error("Downloaded LUT file is empty");
+    }
     
     // Upload to S3
     const s3Key = "luts/color_grade.cube";
+    await awsS3Client.send(new PutObjectCommand({
+      Bucket: "postready-staging",
+      Key: s3Key,
+      Body: lutBuffer,
+      ContentType: "application/octet-stream"
+    }));
+    
+    // Clean up temp file
+    fs.unlinkSync(tempLutPath);
+    
+    console.log(`   ✅ LUT uploaded to S3: s3://postready-staging/${s3Key}`);
+    return `s3://postready-staging/${s3Key}`;
+  } catch (err) {
+    console.error(`Error uploading LUT: ${err.message}`);
+    throw err;
+  }
+}
+
 /**
  * Create and store a MediaConvert output preset in S3
  * Presets include timecode, color grading, and codec settings
