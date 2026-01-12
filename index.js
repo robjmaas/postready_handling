@@ -2393,7 +2393,6 @@ async function pollPendingMediaConvertJobs() {
             let frameioUrl = outputUrl;
             if (outputUrl.startsWith("s3://")) {
               try {
-                // Try presigned URL first (more secure)
                 let s3Path = outputUrl;
                 if (outputUrl.includes("s3://")) {
                   s3Path = outputUrl.split("s3://postready-staging/")[1] || outputUrl.split("postready-staging/")[1];
@@ -2407,7 +2406,7 @@ async function pollPendingMediaConvertJobs() {
                 console.log(`   Original S3 URL: ${outputUrl}`);
                 console.log(`   Extracted S3 path: ${s3Path}`);
                 
-                // Generate presigned URL
+                // Generate presigned URL with 24-hour expiration for Frame.io download
                 const { GetObjectCommand } = await import("@aws-sdk/client-s3");
                 const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
                 
@@ -2424,21 +2423,20 @@ async function pollPendingMediaConvertJobs() {
                   Key: s3Path
                 });
                 
-                const presignedUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 3600 });
-                console.log(`   ✅ Presigned URL created (expires in 1 hour)`);
+                // Use 24-hour expiration (86400 seconds) to ensure Frame.io can download fully
+                const presignedUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+                console.log(`   ✅ Presigned URL created (expires in 24 hours)`);
                 console.log(`   Full presigned URL length: ${presignedUrl.length} chars`);
                 
-                // Use public S3 URL instead (for better Frame.io compatibility)
-                // Format: https://bucket-name.s3.region.amazonaws.com/key
-                frameioUrl = `https://postready-staging.s3.us-east-1.amazonaws.com/${s3Path}`;
-                console.log(`   Using public S3 URL: ${frameioUrl.substring(0, 100)}...`);
-                console.log(`   (S3 bucket is public for Frame.io access)`);
+                frameioUrl = presignedUrl;
+                console.log(`   Using presigned S3 URL for Frame.io: ${frameioUrl.substring(0, 100)}...`);
               } catch (urlErr) {
                 console.warn(`⚠️  Failed to create presigned URL: ${urlErr.message}`);
-                // Fallback to public S3 URL directly
+                // Fallback: use S3 URL with path-style access
                 let s3Path = outputUrl.split("s3://postready-staging/")[1] || outputUrl.split("postready-staging/")[1];
                 if (s3Path.startsWith("/")) s3Path = s3Path.substring(1);
-                frameioUrl = `https://postready-staging.s3.us-east-1.amazonaws.com/${s3Path}`;
+                frameioUrl = `https://s3.us-east-1.amazonaws.com/postready-staging/${s3Path}`;
+                console.log(`   Fallback to path-style S3 URL: ${frameioUrl.substring(0, 100)}...`);
               }
             }
             
