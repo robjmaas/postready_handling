@@ -33,7 +33,7 @@ const MEDIACONVERT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/mediaconvert`;
 
 // MediaConvert settings (only transcoding service)
 const TRANSCODE_SERVICE = "mediaconvert";
-const AWS_REGION = process.env.AWS_REGION || "us-east-1";
+const AWS_REGION = process.env.AWS_REGION || "eu-central-1";
 const AWS_MEDIACONVERT_ROLE = process.env.AWS_MEDIACONVERT_ROLE || "";  // IAM role ARN for MediaConvert
 const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
 const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
@@ -2411,7 +2411,7 @@ async function pollPendingMediaConvertJobs() {
                 const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
                 
                 const awsS3Client = new S3Client({
-                  region: "us-east-1",
+                  region: AWS_REGION,
                   credentials: {
                     accessKeyId: AWS_ACCESS_KEY_ID,
                     secretAccessKey: AWS_SECRET_ACCESS_KEY
