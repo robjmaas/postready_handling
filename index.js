@@ -2423,28 +2423,74 @@ async function pollPendingMediaConvertJobs() {
             console.log(`   Output: ${outputUrl}`);
             console.log(`   Output URL type: ${outputUrl.startsWith("s3://") ? "S3 path" : "HTTPS URL"}`);
             
-            // Check the actual file size in S3
+            // Don't trust MediaConvert's reported output path - list S3 folder to find actual file
+            let actualS3Key = null;
             try {
-              const s3Key = outputUrl.includes("outputs/") ? outputUrl.split("outputs/")[1] : outputUrl.split("postready-staging/")[1];
-              console.log(`   🔍 S3 HeadObject check:`);
-              console.log(`       - Bucket: postready-staging`);
-              console.log(`       - Key: ${s3Key}`);
-              console.log(`       - Full URL: ${outputUrl}`);
-              const headCommand = new HeadObjectCommand({
+              console.log(`   🔄 Listing S3 outputs folder to find actual file...`);
+              const listCommand = new ListObjectsV2Command({
                 Bucket: "postready-staging",
-                Key: s3Key
+                Prefix: "outputs/"
               });
-              const s3FileInfo = await awsS3Client.send(headCommand);
-              console.log(`   📦 S3 file size: ${(s3FileInfo.ContentLength / 1024 / 1024).toFixed(2)} MB`);
-              if (s3FileInfo.ContentLength < 100000) {
-                console.warn(`⚠️  WARNING: Output file is very small (${s3FileInfo.ContentLength} bytes)!`);
-                console.warn(`   This suggests MediaConvert may not have encoded the video properly.`);
+              const listResult = await awsS3Client.send(listCommand);
+              console.log(`   ✅ Found ${listResult.Contents?.length || 0} files in S3 outputs/`);
+              
+              if (listResult.Contents && listResult.Contents.length > 0) {
+                // Get the most recently modified file
+                const sortedByTime = listResult.Contents
+                  .filter(obj => obj.Key.endsWith(".mp4"))
+                  .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
+                
+                if (sortedByTime.length > 0) {
+                  actualS3Key = sortedByTime[0].Key.replace("outputs/", "");
+                  const sizeInMB = (sortedByTime[0].Size / 1024 / 1024).toFixed(2);
+                  console.log(`   📊 Most recent file: ${actualS3Key} (${sizeInMB} MB, modified: ${sortedByTime[0].LastModified})`);
+                } else {
+                  console.warn(`   ⚠️  No .mp4 files found in outputs/`);
+                }
+              } else {
+                console.warn(`   ⚠️  outputs/ folder is empty!`);
               }
-            } catch (sizeErr) {
-              console.warn(`Could not check file size: ${sizeErr.message}`);
-              console.warn(`   Error code: ${sizeErr.Code}`);
-              console.warn(`   Error name: ${sizeErr.name}`);
-              console.warn(`   Full error:`, sizeErr);
+            } catch (listErr) {
+              console.error(`❌ Error listing S3:`, listErr.message);
+            }
+            
+            // If we found an actual file, use that; otherwise try the reported path
+            if (actualS3Key) {
+              console.log(`   ✅ Using actual S3 file: outputs/${actualS3Key}`);
+              outputUrl = `s3://postready-staging/outputs/${actualS3Key}`;
+              
+              // Verify file size
+              try {
+                const headCommand = new HeadObjectCommand({
+                  Bucket: "postready-staging",
+                  Key: `outputs/${actualS3Key}`
+                });
+                const s3FileInfo = await awsS3Client.send(headCommand);
+                console.log(`   📦 S3 file size: ${(s3FileInfo.ContentLength / 1024 / 1024).toFixed(2)} MB`);
+                if (s3FileInfo.ContentLength < 100000) {
+                  console.warn(`⚠️  WARNING: Output file is very small (${s3FileInfo.ContentLength} bytes)!`);
+                  console.warn(`   This suggests MediaConvert may not have encoded the video properly.`);
+                }
+              } catch (sizeErr) {
+                console.error(`❌ Could not verify file:`, sizeErr.message);
+              }
+            } else {
+              // Fallback: try to verify the reported path
+              console.log(`   🔄 File not found via listing, trying reported path...`);
+              try {
+                const s3Key = outputUrl.includes("outputs/") ? outputUrl.split("outputs/")[1] : outputUrl.split("postready-staging/")[1];
+                console.log(`   🔍 S3 HeadObject check for: ${s3Key}`);
+                const headCommand = new HeadObjectCommand({
+                  Bucket: "postready-staging",
+                  Key: s3Key
+                });
+                const s3FileInfo = await awsS3Client.send(headCommand);
+                console.log(`   📦 S3 file size: ${(s3FileInfo.ContentLength / 1024 / 1024).toFixed(2)} MB`);
+              } catch (sizeErr) {
+                console.warn(`Could not verify reported file:`, sizeErr.message);
+                console.warn(`   ⚠️  File does not exist in S3 - skipping for now`);
+                return; // Skip this job, try again later
+              }
             }
             
             // Convert S3 path to presigned HTTPS URL for Frame.io
