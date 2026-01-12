@@ -294,11 +294,11 @@ function isVideoFile(filename) {
   return videoExtensions.includes(ext);
 }
 
-async function processFilemailTransfer(transferId, presetName = "default") {
+async function processFilemailTransfer(transferId, templateName = "Postready") {
   try {
     console.log("Processing Filemail transfer:", transferId);
     console.log(`📡 Using transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
-    console.log(`🎨 Using preset: ${presetName}`);
+    console.log(`🎬 Using job template: ${templateName}`);
     console.log("Fetching Filemail files...");
     const files = await getFilemailFiles(transferId);
 
@@ -314,7 +314,7 @@ async function processFilemailTransfer(transferId, presetName = "default") {
     console.log(`Video files to process: ${videoFiles.length}`);
     console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
     console.log(`Transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
-    console.log(`Preset: ${presetName}`);
+    console.log(`Job Template: ${templateName}`);
     console.log("=".repeat(60) + "\n");
 
     for (const file of files) {
@@ -334,11 +334,11 @@ async function processFilemailTransfer(transferId, presetName = "default") {
       try {
         let result;
         
-        // Use MediaConvert only
-        console.log(`🚀 Submitting to AWS MediaConvert (DCI-P3 color + embedded timecode)`);
+        // Use MediaConvert with job template
+        console.log(`🚀 Submitting to AWS MediaConvert with template: ${templateName}`);
         try {
           console.log(`   Attempting MediaConvert submission...`);
-          result = await sendToMediaConvert(file.downloadurl, file.filename, presetName);
+          result = await sendToMediaConvert(file.downloadurl, file.filename, templateName);
           // Store MediaConvert job in database
           await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
           console.log(`✅ MediaConvert job stored: ${result.id}`);
@@ -815,16 +815,15 @@ async function cleanupS3Staging(stagingKey) {
 }
 
 /**
- * Submit video to AWS MediaConvert for transcoding with LUT color grading
- * Stages file to S3 first to avoid SSL certificate issues with Filemail URLs
- * Optionally uses a preset for output configuration
+ * Submit video to AWS MediaConvert using a job template
+ * Stages file to S3 first, then creates job from template
  */
-async function sendToMediaConvert(downloadUrl, filename, presetName = "default") {
+async function sendToMediaConvert(downloadUrl, filename, templateName = "Postready") {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`📡 MEDIACONVERT SUBMISSION START`);
   console.log(`${'='.repeat(60)}`);
   console.log(`File: ${filename}`);
-  console.log(`Preset: ${presetName}`);
+  console.log(`Template: ${templateName}`);
   console.log(`URL: ${downloadUrl.substring(0, 100)}...`);
   
   if (!mediaConvertClient) {
@@ -834,214 +833,56 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
   }
 
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  // Remove extension for NameModifier (MediaConvert will add .mp4)
   const nameModifier = safeFilename.replace(/\.\w+$/, "");
   console.log(`Safe filename: ${safeFilename}, NameModifier: ${nameModifier}`);
   
   let stagingInfo = null;
   
   try {
-    // Load preset
-    let preset = await loadMediaConvertPreset(presetName);
-    if (!preset) {
-      console.warn(`⚠️  Preset not found: ${presetName}, using defaults`);
-      // Use inline defaults if preset not found
-      preset = {
-        videoCodec: "H_264",
-        width: 1920,
-        height: 1080,
-        framerateNumerator: 30,
-        framerateDenominator: 1,
-        rateControlMode: "QVBR",
-        maxBitrate: 8000000,
-        gopSize: 30,
-        subGopLength: 1,
-        timecodeInsertion: "PIC_TIMING_SEI",
-        colorConversion: "REC_709_TO_DCI_P3",
-        audioCodec: "AAC",
-        audioBitrate: 128000,
-        audioSampleRate: 48000,
-        container: "MP4"
-      };
+    // Verify job template exists
+    console.log(`\n[Step 1/2] Verifying job template: ${templateName}`);
+    const template = await getJobTemplate(templateName);
+    if (!template) {
+      throw new Error(`Job template not found: ${templateName}`);
     }
-    console.log(`✅ Loaded preset: ${presetName}`);
-    console.log(`   Resolution: ${preset.width}x${preset.height}`);
-    const bitrateInfo = preset.rateControlMode === "CBR" 
-      ? `CBR ${(preset.bitrate / 1000000).toFixed(1)} Mbps`
-      : `QVBR max ${(preset.maxBitrate / 1000000).toFixed(1)} Mbps`;
-    console.log(`   Video codec: ${preset.videoCodec}, ${bitrateInfo}`);
-    console.log(`   Audio: ${preset.audioCodec} @ ${preset.audioBitrate} bps, ${preset.audioSampleRate} Hz`);
-    console.log(`   Container: ${preset.container}`);
-    console.log(`   Color space: ${preset.colorConversion}`);
-    console.log(`   Timecode: ${preset.timecodeInsertion}`);
-    if (preset.timecodeBurnin) {
-      console.log(`   ⏱️  Timecode Burnin: ${preset.timecodeBurnin}`);
-    }
+    console.log(`✅ Job template found: ${templateName}`);
+    console.log(`   Created: ${template.CreatedAt}`);
+    console.log(`   ARN: ${template.Arn}`);
     
-    // Stage file to S3 first (MediaConvert has SSL/TLS issues with Filemail URLs)
-    console.log(`\n[Step 1/3] Starting S3 staging...`);
+    // Stage file to S3
+    console.log(`\n[Step 2/2] Staging file to S3...`);
     stagingInfo = await stageFileToS3(downloadUrl, filename);
     console.log(`✅ S3 staging complete`);
     const fileInput = stagingInfo.s3Url;
-    console.log(`Input for MediaConvert: ${fileInput}`);
+    console.log(`   Input: ${fileInput}`);
     
-    // Check for LUT and upload to S3 if available
-    // NOTE: MediaConvert doesn't support .cube LUT files natively
-    // It only supports matrix-based color space conversions like REC_709_TO_DCI_P3
-    // For now, we skip LUT for MediaConvert and use built-in color conversion
-    console.log(`\n[Step 2/3] Checking LUT configuration...`);
-    let lutS3Path = null;
-    console.log(`⏭️  LUT skipped for MediaConvert (uses built-in REC_709_TO_DCI_P3 conversion instead)`);
-    
-    // Build MediaConvert job
-    console.log(`\n[Step 3/3] Building MediaConvert job...`);
-    console.log(`   LUT: Disabled (MediaConvert uses matrix conversion instead)`);
-    console.log(`   Input file: ${fileInput}`);
-    console.log(`   Output destination: s3://postready-staging/outputs/`);
-    console.log(`   Output name modifier: ${nameModifier}`);
-    
-    // Determine output extension based on container
-    const containerExtensionMap = {
-      "MP4": ".mp4",
-      "MOV": ".mov",
-      "MXF": ".mxf",
-      "MPEG2": ".m2v"
-    };
-    const outputExtension = containerExtensionMap[preset.container] || ".mp4";
-    const outputNameModifier = `${nameModifier}${outputExtension}`;
-    console.log(`   Output extension: ${outputExtension}`);
-    
-    const jobSettings = {
-      OutputGroups: [
-        {
-          Name: "File Group",
-          OutputGroupSettings: {
-            Type: "FILE_GROUP_SETTINGS",
-            FileGroupSettings: {
-              Destination: "s3://postready-staging/outputs/"
-            }
-          },
-          Outputs: [
-            {
-              NameModifier: outputNameModifier,
-              VideoDescription: {
-                Width: preset.width || 1920,
-                Height: preset.height || 1080,
-                CodecSettings: {
-                  Codec: preset.videoCodec || "H_264",
-                  H264Settings: {
-                    RateControlMode: preset.rateControlMode || "QVBR",
-                    ...(preset.rateControlMode === "CBR" && preset.bitrate && {
-                      Bitrate: preset.bitrate
-                    }),
-                    ...((preset.rateControlMode === "QVBR" || !preset.rateControlMode) && {
-                      MaxBitrate: preset.maxBitrate || 8000000
-                    }),
-                    // QVBR mode: do NOT specify Bitrate (only MaxBitrate)
-                    // CBR mode: do NOT specify MaxBitrate (only Bitrate)
-                    FramerateDenominator: preset.framerateDenominator || 1,
-                    FramerateNumerator: preset.framerateNumerator || 30,
-                    GopSize: preset.gopSize || 30,
-                    SubGopLength: preset.subGopLength || 1
-                  }
-                },
-                // Apply DCI-P3 color space conversion
-                ColorSpaceConversion: preset.colorConversion || "REC_709_TO_DCI_P3",
-                // Preserve timecode from source in container
-                TimecodeInsertion: preset.timecodeInsertion || "PIC_TIMING_SEI",
-                // Add timecode burnin if configured in preset
-                ...(preset.timecodeBurnin && {
-                  VideoPreprocessors: {
-                    TimecodeBurnin: {
-                      Position: preset.timecodeBurnin,
-                      FontSize: 32,
-                      Opacity: 100
-                    }
-                  }
-                })
-              },
-              AudioDescriptions: [
-                {
-                  AudioSourceName: "Audio Selector 1",
-                  CodecSettings: {
-                    Codec: preset.audioCodec || "AAC",
-                    AacSettings: {
-                      Bitrate: preset.audioBitrate || 128000,
-                      CodingMode: "CODING_MODE_2_0",
-                      SampleRate: preset.audioSampleRate || 48000
-                    }
-                  }
-                }
-              ],
-              ContainerSettings: {
-                Container: preset.container || "MP4",
-                ...(preset.container === "MOV" && {
-                  MovSettings: {
-                    CslgAtom: "INCLUDE"
-                  }
-                }),
-                ...((preset.container === "MP4" || !preset.container) && {
-                  Mp4Settings: {
-                    CslgAtom: "INCLUDE",
-                    FreeSpaceBox: "EXCLUDE",
-                    MoovPlacement: "PROGRESSIVE_DOWNLOAD",
-                    TimecodeInsertion: "ENABLED"
-                  }
-                })
-              }
-            }
-          ]
-        }
-      ],
-      Inputs: [
-        {
-          AudioSelectors: {
-            "Audio Selector 1": {
-              DefaultSelection: "DEFAULT"
-            }
-          },
-          VideoSelector: {
-            // Preserve all video properties
-            Rotate: "AUTO"
-          },
-          TimecodeSource: preset.timecodeSource || "EMBEDDED",  // Use timecode from source video per preset
-          FileInput: fileInput
-        }
-      ],
-      TimecodeConfig: {
-        Source: preset.timecodeSource || "EMBEDDED",  // Use preset timecode source - will preserve source timecode
-        Start: "00:00:00:00"  // Fallback start timecode if source doesn't have one
-      },
-      StatusUpdateInterval: "SECONDS_30",
-      UserMetadata: {
-        service: "mediaconvert",
-        filename: safeFilename,
-        colorspace: "DCI-P3",
-        lutApplied: lutS3Path ? "yes" : "no"
-      }
-    };
-
-    console.log(`Submitting to MediaConvert API...`);
+    // Create job from template
+    console.log(`\nCreating MediaConvert job from template...`);
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
-      Settings: jobSettings,
-      Queue: "Default",
-      StatusUpdateInterval: "SECONDS_30"
+      JobTemplate: templateName,
+      Input: {
+        FileInput: fileInput,
+        AudioSelectors: {
+          "Audio Selector 1": {
+            DefaultSelection: "DEFAULT"
+          }
+        },
+        VideoSelector: {
+          Rotate: "AUTO"
+        },
+        TimecodeSource: "EMBEDDED"
+      }
     });
 
-    console.log(`Sending CreateJobCommand...`);
-    console.log(`   Video codec: ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.CodecSettings.Codec}`);
-    console.log(`   Container: ${jobSettings.OutputGroups[0].Outputs[0].ContainerSettings.Container}`);
-    console.log(`   Width x Height: ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.Width} x ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.Height}`);
-    console.log(`   Color space: ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.ColorSpaceConversion || "(none)"}`);
+    console.log(`Sending job creation request...`);
     const response = await mediaConvertClient.send(createJobCommand);
     console.log(`✅ API response received`);
     
     console.log(`\n✅ MediaConvert job created: ${response.Job.Id}`);
     console.log(`   Status: ${response.Job.Status}`);
-    console.log(`   🎨 Color grading: DCI-P3 (professional color space)`);
-    console.log(`   ${lutS3Path ? '✅ LUT: Applied from S3' : '⏭️  LUT: Not configured'}`);
-    console.log(`   ⏱️  Timecode: EMBEDDED (preserved from source)`);
+    console.log(`   Template: ${templateName}`);
+    console.log(`   Output: s3://postready-staging/outputs/`);
     console.log(`${'='.repeat(60)}\n`);
     
     return {
@@ -1626,10 +1467,10 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
 app.post("/process/transfer/:transferId", async (req, res) => {
   try {
     const { transferId } = req.params;
-    const { preset = "default" } = req.body; // Allow specifying preset
+    const { templateName = "Postready" } = req.body; // Allow specifying job template
     
     console.log(`\n📌 PROCESSING STARTED FOR TRANSFER: ${transferId}`);
-    console.log(`   Preset: ${preset}`);
+    console.log(`   Job Template: ${templateName}`);
     
     // Check if already processed
     if (await isTransferProcessed(transferId)) {
@@ -1644,14 +1485,14 @@ app.post("/process/transfer/:transferId", async (req, res) => {
     // Mark as processing to avoid duplicates
     await markTransferProcessed(transferId);
     
-    // Start processing with selected preset
-    processFilemailTransfer(transferId, preset);
+    // Start processing with selected job template
+    processFilemailTransfer(transferId, templateName);
     
     res.json({ 
       success: true, 
       message: "Transfer processing started",
       transferId,
-      preset,
+      templateName,
       timestamp: new Date().toISOString()
     });
   } catch (err) {
