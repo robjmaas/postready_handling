@@ -100,7 +100,49 @@ async function verifyLUTFile() {
   } catch (err) {
     console.warn(`⚠️  LUT file not found or not accessible: s3://postready-staging/Awsome1.cube`);
     console.warn(`   Error: ${err.message}`);
+    console.warn(`   📋 Required IAM Policy for MediaConvert Role:`);
+    console.warn(`   {`);
+    console.warn(`     "Effect": "Allow",`);
+    console.warn(`     "Action": "s3:GetObject",`);
+    console.warn(`     "Resource": "arn:aws:s3:::postready-staging/Awsome1.cube"`);
+    console.warn(`   }`);
     console.warn(`   Videos will be processed without LUT color grading`);
+    return false;
+  }
+}
+
+async function verifyMediaConvertRolePermissions() {
+  if (!process.env.AWS_MEDIACONVERT_ROLE) {
+    console.warn(`⚠️  AWS_MEDIACONVERT_ROLE not set - cannot verify permissions`);
+    return false;
+  }
+
+  try {
+    // Try to access the CUBE file as MediaConvert would
+    const headCommand = new HeadObjectCommand({
+      Bucket: "postready-staging",
+      Key: "Awsome1.cube"
+    });
+    await awsS3Client.send(headCommand);
+    console.log(`✅ MediaConvert role has S3:GetObject access to postready-staging/Awsome1.cube`);
+    return true;
+  } catch (err) {
+    if (err.name === 'NoSuchKey') {
+      console.warn(`⚠️  CUBE LUT file does not exist: s3://postready-staging/Awsome1.cube`);
+    } else if (err.name === 'AccessDenied' || err.name === 'Forbidden') {
+      console.error(`❌ MediaConvert role LACKS S3:GetObject permission for postready-staging/Awsome1.cube`);
+      console.error(`   Role ARN: ${process.env.AWS_MEDIACONVERT_ROLE}`);
+      console.error(`   Required IAM policy:`);
+      console.error(`   {`);
+      console.error(`     "Effect": "Allow",`);
+      console.error(`     "Action": "s3:GetObject",`);
+      console.error(`     "Resource": "arn:aws:s3:::postready-staging/Awsome1.cube"`);
+      console.error(`   }`);
+      console.error(`   Alternatively, grant broader S3 access:`);
+      console.error(`     "Resource": "arn:aws:s3:::postready-staging/*"`);
+    } else {
+      console.warn(`⚠️  Could not verify MediaConvert role permissions: ${err.message}`);
+    }
     return false;
   }
 }
@@ -190,6 +232,7 @@ async function jobExists(transferId, filename) {
 await initDb();
 await testS3BucketAccess();
 await verifyLUTFile();
+await verifyMediaConvertRolePermissions();
 
 // Initialize AWS Job Templates
 try {
@@ -1685,6 +1728,37 @@ app.get("/db/stats", async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/permissions - Verify AWS role permissions for CUBE LUT
+ */
+app.get("/db/permissions", async (req, res) => {
+  try {
+    const hasAccess = await verifyMediaConvertRolePermissions();
+    const lutFileExists = await verifyLUTFile();
+    
+    res.json({
+      success: true,
+      mediaConvertRole: process.env.AWS_MEDIACONVERT_ROLE || "not set",
+      cubeFile: {
+        path: "s3://postready-staging/Awsome1.cube",
+        exists: lutFileExists,
+        accessible: hasAccess
+      },
+      requiredPolicy: {
+        Effect: "Allow",
+        Action: "s3:GetObject",
+        Resource: "arn:aws:s3:::postready-staging/Awsome1.cube"
+      },
+      status: hasAccess && lutFileExists ? "✅ Ready for LUT color grading" : "⚠️ LUT color grading not available"
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      success: false, 
+      error: err.message 
+    });
   }
 });
 
