@@ -2038,13 +2038,44 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
     if (jobStatus === "COMPLETE") {
       status = "completed";
       
-      // Extract output URL from outputs array
+      console.log(`🔍 Looking for output in webhook message...`);
+      console.log(`   - Has outputGroupDetails? ${!!message.detail?.outputGroupDetails}`);
+      console.log(`   - OutputGroupDetails count: ${message.detail?.outputGroupDetails?.length || 0}`);
+      if (message.detail?.outputGroupDetails?.[0]) {
+        console.log(`   - First group has outputDetails? ${!!message.detail.outputGroupDetails[0].outputDetails}`);
+        console.log(`   - First group outputDetails count: ${message.detail.outputGroupDetails[0].outputDetails?.length || 0}`);
+        if (message.detail.outputGroupDetails[0].outputDetails?.[0]) {
+          console.log(`   - First detail has outputFilePaths? ${!!message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths}`);
+          console.log(`   - First detail outputFilePaths count: ${message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths?.length || 0}`);
+        }
+      }
+      
+      // Try multiple paths to find the output
+      let outputPath = null;
+      
+      // Path 1: Standard webhook response structure
       if (message.detail?.outputGroupDetails?.[0]?.outputDetails?.[0]?.outputFilePaths?.[0]) {
-        const outputPath = message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths[0];
-        console.log(`✅ Found output: ${outputPath}`);
-        
+        outputPath = message.detail.outputGroupDetails[0].outputDetails[0].outputFilePaths[0];
+        console.log(`✅ Found output via Path 1 (outputGroupDetails): ${outputPath}`);
+      }
+      
+      // Path 2: Try alternative structure
+      if (!outputPath && message.detail?.job?.Settings?.OutputGroups?.[0]?.Outputs?.[0]?.OutputSettings?.S3OutputSettings) {
+        const s3Settings = message.detail.job.Settings.OutputGroups[0].Outputs[0].OutputSettings.S3OutputSettings;
+        outputPath = `${s3Settings.S3Bucket}/${s3Settings.S3Prefix || ''}`;
+        console.log(`✅ Found output via Path 2 (Settings): ${outputPath}`);
+      }
+      
+      // If still not found, try to construct from job details
+      if (!outputPath && message.detail?.outputGroupDetails?.[0]) {
+        console.log(`   Webhook structure keys:`, Object.keys(message.detail?.outputGroupDetails?.[0] || {}));
+      }
+      
+      if (outputPath) {
         // Extract just the filename
-        const outputKey = outputPath.replace("s3://postready-staging/outputs/", "");
+        const outputKey = outputPath.replace("s3://postready-staging/outputs/", "").replace("postready-staging/outputs/", "");
+        
+        console.log(`   Extracted output key: ${outputKey}`);
         
         // Get signed URL for Frame.io (non-blocking)
         getSignedS3Url(outputKey)
@@ -2062,6 +2093,7 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
           });
       } else {
         console.error(`❌ No output file found in MediaConvert response`);
+        console.error(`   Full detail object keys:`, Object.keys(message.detail || {}));
         error = "No output file in response";
         status = "failed";
       }
