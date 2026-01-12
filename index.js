@@ -939,12 +939,32 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     const fileInput = stagingInfo.s3Url;
     console.log(`   Input: ${fileInput}`);
     
-    // Create job from template
+    // Create job from template with ColorCorrector override
     console.log(`\nCreating MediaConvert job from template...`);
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       JobTemplate: templateName,
       Settings: {
+        OutputGroups: [
+          {
+            OutputGroupSettings: {
+              Type: "FILE_GROUP_SETTINGS",
+              FileGroupSettings: {
+                Destination: "s3://postready-staging/outputs/"
+              }
+            },
+            Outputs: [
+              {
+                VideoDescription: {
+                  ColorCorrector: {
+                    Lut3d: "s3://postready-staging/Awsome1.cube",
+                    Lut3dByteOrder: "AUTO"
+                  }
+                }
+              }
+            ]
+          }
+        ],
         Inputs: [
           {
             FileInput: fileInput,
@@ -970,6 +990,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     console.log(`   Status: ${response.Job.Status}`);
     console.log(`   Template: ${templateName}`);
     console.log(`   Output: s3://postready-staging/outputs/`);
+    console.log(`   🎨 LUT: s3://postready-staging/Awsome1.cube (ColorCorrector applied)`);
     console.log(`${'='.repeat(60)}\n`);
     
     return {
