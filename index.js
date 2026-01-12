@@ -2447,13 +2447,42 @@ async function pollPendingMediaConvertJobs() {
           if (outputUrl) {
             console.log(`   Output: ${outputUrl}`);
             
+            // Convert S3 path to presigned HTTPS URL for Frame.io
+            let frameioUrl = outputUrl;
+            if (outputUrl.startsWith("s3://")) {
+              try {
+                const s3Path = outputUrl.replace("s3://postready-staging/", "");
+                const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+                const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+                
+                const awsS3Client = new S3Client({
+                  region: "us-east-1",
+                  credentials: {
+                    accessKeyId: AWS_ACCESS_KEY_ID,
+                    secretAccessKey: AWS_SECRET_ACCESS_KEY
+                  }
+                });
+                
+                const getCommand = new GetObjectCommand({
+                  Bucket: "postready-staging",
+                  Key: s3Path
+                });
+                
+                frameioUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 3600 });
+                console.log(`   Presigned URL for Frame.io: ${frameioUrl.substring(0, 80)}...`);
+              } catch (urlErr) {
+                console.warn(`⚠️  Failed to create presigned URL: ${urlErr.message}`);
+                frameioUrl = outputUrl; // Fallback to original
+              }
+            }
+            
             // Simulate webhook completion
             const originalFilename = job.filename.replace(/^\[MC\]\s/, '');
             console.log(`\n🎬 MediaConvert job detected - skipping FFmpeg (already has LUT + timecode)`);
             console.log(`📤 Video is ready in Wasabi: ${outputUrl}`);
 
-            // Upload to Frame.io
-            uploadToFrameIO(outputUrl, originalFilename)
+            // Upload to Frame.io with presigned URL
+            uploadToFrameIO(frameioUrl, originalFilename)
               .then((frameioResult) => {
                 if (frameioResult) {
                   console.log(`✅ Uploaded to Frame.io: ${frameioResult.id}`);
