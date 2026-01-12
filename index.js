@@ -713,6 +713,10 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     
     // Build MediaConvert job
     console.log(`\n[Step 3/3] Building MediaConvert job...`);
+    console.log(`   LUT S3 Path: ${lutS3Path || "(none)"}`);
+    console.log(`   Input file: ${fileInput}`);
+    console.log(`   Output destination: s3://postready-staging/outputs/`);
+    console.log(`   Output name modifier: ${nameModifier}`);
     const jobSettings = {
       OutputGroups: [
         {
@@ -741,9 +745,9 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
                     SubGopLength: preset.subGopLength || 1
                   }
                 },
-                // Apply color space conversion from preset
+                // Apply color space conversion from preset (basic transformation)
                 ...(lutS3Path && {
-                  ColorConversion: preset.colorConversion || "REC_709_TO_DCI_P3"
+                  ColorSpaceConversion: preset.colorConversion || "REC_709_TO_DCI_P3"
                 }),
                 // Preserve timecode from source in container
                 TimecodeInsertion: preset.timecodeInsertion || "PIC_TIMING_SEI"
@@ -811,6 +815,10 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     });
 
     console.log(`Sending CreateJobCommand...`);
+    console.log(`   Video codec: ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.CodecSettings.Codec}`);
+    console.log(`   Container: ${jobSettings.OutputGroups[0].Outputs[0].ContainerSettings.Container}`);
+    console.log(`   Width x Height: ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.Width} x ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.Height}`);
+    console.log(`   Color space: ${jobSettings.OutputGroups[0].Outputs[0].VideoDescription.ColorSpaceConversion || "(none)"}`);
     const response = await mediaConvertClient.send(createJobCommand);
     console.log(`✅ API response received`);
     
@@ -2413,6 +2421,16 @@ async function pollPendingMediaConvertJobs() {
 
         if (mcJob.Status === "COMPLETE") {
           console.log(`✅ MediaConvert job completed: ${job.id}`);
+          
+          // Log any warnings or messages from MediaConvert
+          if (mcJob.Messages && mcJob.Messages.length > 0) {
+            console.log(`⚠️  MediaConvert Messages:`);
+            mcJob.Messages.forEach(msg => console.log(`   - ${msg}`));
+          }
+          if (mcJob.Warnings && mcJob.Warnings.length > 0) {
+            console.log(`⚠️  MediaConvert Warnings:`);
+            mcJob.Warnings.forEach(warn => console.log(`   - ${JSON.stringify(warn)}`));
+          }
 
           // Extract output URL from MediaConvert response
           let outputUrl = null;
