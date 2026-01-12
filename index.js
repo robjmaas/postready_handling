@@ -698,22 +698,16 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     console.log(`Input for MediaConvert: ${fileInput}`);
     
     // Check for LUT and upload to S3 if available
+    // NOTE: MediaConvert doesn't support .cube LUT files natively
+    // It only supports matrix-based color space conversions like REC_709_TO_DCI_P3
+    // For now, we skip LUT for MediaConvert and use built-in color conversion
     console.log(`\n[Step 2/3] Checking LUT configuration...`);
-    const lutUrl = await getLutUrl();
     let lutS3Path = null;
-    if (lutUrl && lutUrl.length > 0) {
-      console.log(`LUT URL found, uploading to S3...`);
-      try {
-        lutS3Path = await downloadAndUploadLutToS3(lutUrl);
-        console.log(`✅ LUT uploaded to S3: ${lutS3Path}`);
-      } catch (err) {
-        console.warn(`⚠️  Failed to upload LUT: ${err.message}`);
-      }
-    }
+    console.log(`⏭️  LUT skipped for MediaConvert (uses built-in REC_709_TO_DCI_P3 conversion instead)`);
     
     // Build MediaConvert job
     console.log(`\n[Step 3/3] Building MediaConvert job...`);
-    console.log(`   LUT S3 Path: ${lutS3Path || "(none)"}`);
+    console.log(`   LUT: Disabled (MediaConvert uses matrix conversion instead)`);
     console.log(`   Input file: ${fileInput}`);
     console.log(`   Output destination: s3://postready-staging/outputs/`);
     console.log(`   Output name modifier: ${nameModifier}`);
@@ -745,10 +739,8 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
                     SubGopLength: preset.subGopLength || 1
                   }
                 },
-                // Apply color space conversion from preset (basic transformation)
-                ...(lutS3Path && {
-                  ColorSpaceConversion: preset.colorConversion || "REC_709_TO_DCI_P3"
-                }),
+                // Apply DCI-P3 color space conversion
+                ColorSpaceConversion: preset.colorConversion || "REC_709_TO_DCI_P3",
                 // Preserve timecode from source in container
                 TimecodeInsertion: preset.timecodeInsertion || "PIC_TIMING_SEI"
               },
@@ -2379,6 +2371,22 @@ async function pollPendingMediaConvertJobs() {
           if (outputUrl) {
             console.log(`   Output: ${outputUrl}`);
             console.log(`   Output URL type: ${outputUrl.startsWith("s3://") ? "S3 path" : "HTTPS URL"}`);
+            
+            // Check the actual file size in S3
+            try {
+              const headCommand = new HeadObjectCommand({
+                Bucket: "postready-staging",
+                Key: outputUrl.includes("outputs/") ? outputUrl.split("outputs/")[1] : outputUrl.split("postready-staging/")[1]
+              });
+              const s3FileInfo = await awsS3Client.send(headCommand);
+              console.log(`   📦 S3 file size: ${(s3FileInfo.ContentLength / 1024 / 1024).toFixed(2)} MB`);
+              if (s3FileInfo.ContentLength < 100000) {
+                console.warn(`⚠️  WARNING: Output file is very small (${s3FileInfo.ContentLength} bytes)!`);
+                console.warn(`   This suggests MediaConvert may not have encoded the video properly.`);
+              }
+            } catch (sizeErr) {
+              console.warn(`Could not check file size: ${sizeErr.message}`);
+            }
             
             // Convert S3 path to presigned HTTPS URL for Frame.io
             let frameioUrl = outputUrl;
