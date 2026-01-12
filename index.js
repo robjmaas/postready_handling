@@ -696,7 +696,9 @@ const POSTREADY_TEMPLATE = {
               "Width": 1280,
               "Height": 720,
               "ColorCorrector": {
-                "ColorSpaceConversion": "REC_709_TO_DCI_P3"
+                "ColorSpaceConversion": "REC_709_TO_DCI_P3",
+                "Lut3d": "https://postready-staging.s3.us-east-1.amazonaws.com/Awsome1.cube",
+                "Lut3dByteOrder": "AUTO"
               },
               "VideoPreprocessors": {
                 "TimecodeBurnin": {
@@ -954,7 +956,9 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                   Width: 1280,
                   Height: 720,
                   ColorCorrector: {
-                    ColorSpaceConversion: "REC_709_TO_DCI_P3"
+                    ColorSpaceConversion: "REC_709_TO_DCI_P3",
+                    Lut3d: "https://postready-staging.s3.us-east-1.amazonaws.com/Awsome1.cube",
+                    Lut3dByteOrder: "AUTO"
                   },
                   VideoPreprocessors: {
                     TimecodeBurnin: {
