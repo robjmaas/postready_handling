@@ -793,7 +793,6 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
         Source: preset.timecodeSource || "EMBEDDED",  // Use preset timecode source - will preserve source timecode
         Start: "00:00:00:00"  // Fallback start timecode if source doesn't have one
       },
-      // Webhook for job completion
       StatusUpdateInterval: "SECONDS_30",
       UserMetadata: {
         service: "mediaconvert",
@@ -2387,3 +2386,116 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * Poll pending MediaConvert jobs and complete them when ready
+ * This is called periodically to check for job completion
+ */
+async function pollPendingMediaConvertJobs() {
+  try {
+    // Get all pending MediaConvert jobs (marked with [MC] in filename)
+    const pendingJobs = await db.all(
+      "SELECT * FROM coconut_jobs WHERE status = ? AND filename LIKE ?",
+      ["pending", "[MC]%"]
+    );
+
+    if (pendingJobs.length === 0) return;
+
+    console.log(`\n🔍 Polling ${pendingJobs.length} pending MediaConvert job(s)...`);
+
+    for (const job of pendingJobs) {
+      try {
+        const getJobCommand = new GetJobCommand({ Id: job.id });
+        const response = await mediaConvertClient.send(getJobCommand);
+        const mcJob = response.Job;
+
+        console.log(`   Job ${job.id.substring(0, 12)}... Status: ${mcJob.Status}`);
+
+        if (mcJob.Status === "COMPLETE") {
+          console.log(`✅ MediaConvert job completed: ${job.id}`);
+
+          // Extract output URL from MediaConvert response
+          let outputUrl = null;
+          if (mcJob.OutputGroupDetails && mcJob.OutputGroupDetails.length > 0) {
+            const outputGroup = mcJob.OutputGroupDetails[0];
+            if (outputGroup.OutputDetails && outputGroup.OutputDetails.length > 0) {
+              const outputDetail = outputGroup.OutputDetails[0];
+              if (outputDetail.OutputFilePaths && outputDetail.OutputFilePaths.length > 0) {
+                outputUrl = outputDetail.OutputFilePaths[0];
+              }
+            }
+          }
+
+          if (outputUrl) {
+            console.log(`   Output: ${outputUrl}`);
+            
+            // Simulate webhook completion
+            const originalFilename = job.filename.replace(/^\[MC\]\s/, '');
+            console.log(`\n🎬 MediaConvert job detected - skipping FFmpeg (already has LUT + timecode)`);
+            console.log(`📤 Video is ready in Wasabi: ${outputUrl}`);
+
+            // Upload to Frame.io
+            uploadToFrameIO(outputUrl, originalFilename)
+              .then((frameioResult) => {
+                if (frameioResult) {
+                  console.log(`✅ Uploaded to Frame.io: ${frameioResult.id}`);
+                } else {
+                  console.warn(`⚠️  Frame.io upload skipped or failed`);
+                }
+              })
+              .catch((err) => {
+                console.error(`⚠️  Frame.io upload failed: ${err.message}`);
+              });
+
+            // Update job status in database
+            await updateCoconutJob(job.id, "completed", outputUrl, null);
+            console.log(`✅ Job status updated to completed`);
+
+            // Clean up S3 staging
+            if (job.metadata) {
+              try {
+                const metadata = JSON.parse(job.metadata);
+                if (metadata.stagingKey) {
+                  await cleanupS3Staging(metadata.stagingKey);
+                }
+              } catch (parseErr) {
+                console.warn(`Could not parse metadata: ${parseErr.message}`);
+              }
+            }
+          } else {
+            console.warn(`❌ No output URL found in MediaConvert job response`);
+            await updateCoconutJob(job.id, "failed", null, "No output URL in MediaConvert response");
+          }
+        } else if (mcJob.Status === "ERROR" || mcJob.Status === "CANCELED") {
+          console.error(`❌ MediaConvert job failed: ${job.id}`);
+          const errorMsg = mcJob.ErrorMessage || mcJob.Status;
+          await updateCoconutJob(job.id, "failed", null, errorMsg);
+
+          // Clean up S3 staging on error
+          if (job.metadata) {
+            try {
+              const metadata = JSON.parse(job.metadata);
+              if (metadata.stagingKey) {
+                await cleanupS3Staging(metadata.stagingKey);
+              }
+            } catch (parseErr) {
+              console.warn(`Could not parse metadata: ${parseErr.message}`);
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`   Error checking job ${job.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.error(`❌ Error polling jobs: ${err.message}`);
+  }
+}
+
+/**
+ * Start polling pending jobs every 30 seconds
+ */
+if (mediaConvertClient) {
+  setInterval(() => pollPendingMediaConvertJobs(), 30 * 1000);
+  console.log(`✅ MediaConvert job polling started (every 30 seconds)`);
+}
