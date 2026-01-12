@@ -2452,8 +2452,8 @@ async function pollPendingMediaConvertJobs() {
             if (destination) {
               // Construct output URL from destination + output name modifier
               const outputSettings = outputGroup.Outputs?.[0];
-              const nameModifier = outputSettings?.NameModifier || "output";
-              outputUrl = `${destination}${nameModifier}.mp4`;
+              const nameModifier = outputSettings?.NameModifier || "output.mp4";
+              outputUrl = `${destination}${nameModifier}`;
               console.log(`   Found output via Settings: ${outputUrl}`);
             }
           }
@@ -2485,7 +2485,7 @@ async function pollPendingMediaConvertJobs() {
               if (listResult.Contents && listResult.Contents.length > 0) {
                 // Get the most recently modified file
                 const sortedByTime = listResult.Contents
-                  .filter(obj => obj.Key.endsWith(".mp4"))
+                  .filter(obj => /\.(mp4|mov|mxf|m2v|avi|mkv)$/i.test(obj.Key))
                   .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
                 
                 if (sortedByTime.length > 0) {
@@ -2493,7 +2493,7 @@ async function pollPendingMediaConvertJobs() {
                   const sizeInMB = (sortedByTime[0].Size / 1024 / 1024).toFixed(2);
                   console.log(`   📊 Most recent file: ${actualS3Key} (${sizeInMB} MB, modified: ${sortedByTime[0].LastModified})`);
                 } else {
-                  console.warn(`   ⚠️  No .mp4 files found in outputs/`);
+                  console.warn(`   ⚠️  No video files found in outputs/`);
                 }
               } else {
                 console.warn(`   ⚠️  outputs/ folder is empty!`);
