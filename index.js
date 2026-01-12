@@ -33,20 +33,18 @@ const MEDIACONVERT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/mediaconvert`;
 
 // MediaConvert settings (only transcoding service)
 const TRANSCODE_SERVICE = "mediaconvert";
-const AWS_REGION = process.env.AWS_REGION || "eu-central-1";
+const AWS_REGION = process.env.AWS_REGION || "us-east-1";
 const AWS_MEDIACONVERT_ROLE = process.env.AWS_MEDIACONVERT_ROLE || "";  // IAM role ARN for MediaConvert
 const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID || "";
 const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
 
 // AWS S3 client (for MediaConvert staging and output)
-// Note: postready-staging bucket is actually in Wasabi S3, so we use the Wasabi endpoint
 const awsS3Client = new S3Client({
   region: AWS_REGION,
   credentials: {
     accessKeyId: AWS_ACCESS_KEY_ID,
     secretAccessKey: AWS_SECRET_ACCESS_KEY
-  },
-  endpoint: "https://s3.eu-central-1.wasabisys.com"  // Wasabi S3 endpoint for postready-staging bucket
+  }
 });
 
 // Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
@@ -2417,8 +2415,7 @@ async function pollPendingMediaConvertJobs() {
                   credentials: {
                     accessKeyId: AWS_ACCESS_KEY_ID,
                     secretAccessKey: AWS_SECRET_ACCESS_KEY
-                  },
-                  endpoint: "https://s3.eu-central-1.wasabisys.com"  // Wasabi endpoint
+                  }
                 });
                 
                 const getCommand = new GetObjectCommand({
