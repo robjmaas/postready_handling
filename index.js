@@ -696,6 +696,9 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
     console.log(`   Container: ${preset.container}`);
     console.log(`   Color space: ${preset.colorConversion}`);
     console.log(`   Timecode: ${preset.timecodeInsertion}`);
+    if (preset.timecodeBurnin) {
+      console.log(`   ⏱️  Timecode Burnin: ${preset.timecodeBurnin}`);
+    }
     
     // Stage file to S3 first (MediaConvert has SSL/TLS issues with Filemail URLs)
     console.log(`\n[Step 1/3] Starting S3 staging...`);
@@ -749,7 +752,17 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
                 // Apply DCI-P3 color space conversion
                 ColorSpaceConversion: preset.colorConversion || "REC_709_TO_DCI_P3",
                 // Preserve timecode from source in container
-                TimecodeInsertion: preset.timecodeInsertion || "PIC_TIMING_SEI"
+                TimecodeInsertion: preset.timecodeInsertion || "PIC_TIMING_SEI",
+                // Add timecode burnin if configured in preset
+                ...(preset.timecodeBurnin && {
+                  VideoPreprocessors: {
+                    TimecodeBurnin: {
+                      Position: preset.timecodeBurnin,
+                      FontSize: "LARGE",
+                      Opacity: 100
+                    }
+                  }
+                })
               },
               AudioDescriptions: [
                 {
