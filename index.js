@@ -2214,9 +2214,16 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
         });
         const listResult = await awsS3Client.send(listCommand);
         
-        // Find the most recent file (ordered by modification time)
-        // This avoids matching old files with duplicate nameModifiers
+        console.log(`   📂 S3 outputs folder contents:`);
         if (listResult.Contents && listResult.Contents.length > 0) {
+          console.log(`       Found ${listResult.Contents.length} files:`);
+          listResult.Contents.forEach(obj => {
+            const sizeInMB = (obj.Size / 1024 / 1024).toFixed(2);
+            console.log(`       - ${obj.Key} (${sizeInMB} MB, modified: ${obj.LastModified})`);
+          });
+          
+          // Find the most recent file (ordered by modification time)
+          // This avoids matching old files with duplicate nameModifiers
           const sortedByTime = listResult.Contents
             .filter(obj => obj.Key.endsWith(fileExtension))
             .sort((a, b) => (b.LastModified?.getTime() || 0) - (a.LastModified?.getTime() || 0));
@@ -2224,8 +2231,12 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
           if (sortedByTime.length > 0) {
             // Get the most recently modified file
             actualOutputKey = sortedByTime[0].Key.replace("outputs/", "");
-            console.log(`   📊 Found ${sortedByTime.length} output files, using most recent`);
+            console.log(`   📊 Found ${sortedByTime.length} output files (${fileExtension}), using most recent: ${actualOutputKey}`);
+          } else {
+            console.warn(`   ⚠️  No files matching extension ${fileExtension} found`);
           }
+        } else {
+          console.warn(`   ⚠️  outputs folder is empty!`);
         }
       } catch (err) {
         console.error(`Error listing S3 objects: ${err.message}`);
