@@ -614,6 +614,8 @@ const POSTREADY_TEMPLATE = {
               "Mp4Settings": {}
             },
             "VideoDescription": {
+              "Width": 1280,
+              "Height": 720,
               "VideoPreprocessors": {
                 "TimecodeBurnin": {}
               },
@@ -622,7 +624,7 @@ const POSTREADY_TEMPLATE = {
               "CodecSettings": {
                 "Codec": "H_264",
                 "H264Settings": {
-                  "MaxBitrate": 7200,
+                  "MaxBitrate": 2000000,
                   "RateControlMode": "QVBR",
                   "SceneChangeDetect": "TRANSITION_DETECTION"
                 }
@@ -686,6 +688,8 @@ async function initializePostreadyTemplate() {
     const existing = await getJobTemplate("Postready");
     if (existing) {
       console.log(`✅ Postready template already exists`);
+      console.log(`   Created: ${existing.CreatedAt}`);
+      console.log(`   Updated: ${existing.LastUpdated}`);
       return existing;
     }
     
