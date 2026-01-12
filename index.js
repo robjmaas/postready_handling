@@ -689,6 +689,13 @@ async function sendToMediaConvert(downloadUrl, filename, presetName = "default")
         container: "MP4"
       };
     }
+    console.log(`✅ Loaded preset: ${presetName}`);
+    console.log(`   Resolution: ${preset.width}x${preset.height}`);
+    console.log(`   Video codec: ${preset.videoCodec}, Max bitrate: ${preset.maxBitrate}`);
+    console.log(`   Audio: ${preset.audioCodec} @ ${preset.audioBitrate} bps, ${preset.audioSampleRate} Hz`);
+    console.log(`   Container: ${preset.container}`);
+    console.log(`   Color space: ${preset.colorConversion}`);
+    console.log(`   Timecode: ${preset.timecodeInsertion}`);
     
     // Stage file to S3 first (MediaConvert has SSL/TLS issues with Filemail URLs)
     console.log(`\n[Step 1/3] Starting S3 staging...`);
