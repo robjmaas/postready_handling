@@ -658,7 +658,7 @@ const POSTREADY_TEMPLATE = {
     "ColorConversion3DLUTSettings": [
       {
         "InputColorSpace": "REC_709",
-        "OutputColorSpace": "DCI_P3",
+        "OutputColorSpace": "P3DCI",
         "FileInput": "s3://postready-staging/Awsome1.cube"
       }
     ],
@@ -2407,11 +2407,20 @@ app.post("/api/check-mediaconvert-job/:jobId", async (req, res) => {
       const signedUrl = await getSignedS3Url(actualOutputKey);
       console.log(`✅ Generated signed S3 URL for Frame.io`);
       
+      // Extract clean filename for Frame.io (remove S3 staging temp prefixes)
+      // S3 key format: tmp_<prefix>_<originalname>.<ext> → extract just <originalname>.<ext>
+      let frameioFilename = actualOutputKey;
+      const tempPrefixMatch = actualOutputKey.match(/^tmp_[^_]+_(.+)$/);
+      if (tempPrefixMatch) {
+        frameioFilename = tempPrefixMatch[1];
+        console.log(`   Cleaned filename for Frame.io: ${frameioFilename}`);
+      }
+      
       // Update job in database with AWS S3 URL
       await updateCoconutJob(jobId, "completed", outputPath);
       
       // Upload to Frame.io using signed URL
-      uploadToFrameIO(signedUrl, actualOutputKey)
+      uploadToFrameIO(signedUrl, frameioFilename)
         .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
       
       return res.status(200).json({ 
