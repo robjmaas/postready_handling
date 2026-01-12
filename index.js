@@ -688,7 +688,7 @@ const POSTREADY_TEMPLATE = {
       {
         "FileInput": "s3://postready-staging/Awsome1.cube",
         "InputColorSpace": "REC_709",
-        "OutputColorSpace": "DCI_P3"
+        "OutputColorSpace": "P3DCI"
       }
     ],
     "OutputGroups": [
@@ -943,7 +943,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
           {
             FileInput: "s3://postready-staging/Awsome1.cube",
             InputColorSpace: "REC_709",
-            OutputColorSpace: "DCI_P3"
+            OutputColorSpace: "P3DCI"
           }
         ],
         OutputGroups: [
