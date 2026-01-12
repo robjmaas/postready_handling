@@ -2416,6 +2416,8 @@ async function pollPendingMediaConvertJobs() {
 
           // Extract output URL from MediaConvert response
           let outputUrl = null;
+          
+          // Try multiple possible response formats
           if (mcJob.OutputGroupDetails && mcJob.OutputGroupDetails.length > 0) {
             const outputGroup = mcJob.OutputGroupDetails[0];
             if (outputGroup.OutputDetails && outputGroup.OutputDetails.length > 0) {
@@ -2425,6 +2427,22 @@ async function pollPendingMediaConvertJobs() {
               }
             }
           }
+          
+          // Alternative: check if output is in the Settings
+          if (!outputUrl && mcJob.Settings?.OutputGroups?.[0]) {
+            const outputGroup = mcJob.Settings.OutputGroups[0];
+            const destination = outputGroup.OutputGroupSettings?.FileGroupSettings?.Destination;
+            if (destination) {
+              // Construct output URL from destination + output name modifier
+              const outputSettings = outputGroup.Outputs?.[0];
+              const nameModifier = outputSettings?.NameModifier || "output";
+              outputUrl = `${destination}${nameModifier}.mp4`;
+            }
+          }
+
+          console.log(`   Response keys: ${Object.keys(mcJob).join(", ")}`);
+          console.log(`   OutputGroupDetails: ${mcJob.OutputGroupDetails ? "✓" : "✗"}`);
+          console.log(`   Settings.OutputGroups: ${mcJob.Settings?.OutputGroups ? "✓" : "✗"}`);
 
           if (outputUrl) {
             console.log(`   Output: ${outputUrl}`);
