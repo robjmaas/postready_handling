@@ -1248,7 +1248,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
         CodecSettings: codecSettings,
         // Preserve audio sample rate to maintain sync
         AudioNormalizationSettings: {
-          Algorithm: "TRUE_PEAK",
+          Algorithm: "ITU_BS_1770_3",
           LoudnessLogging: "LOG_ONLY"
         }
       });
