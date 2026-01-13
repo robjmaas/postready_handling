@@ -673,22 +673,77 @@ async function stageFileToS3(downloadUrl, filename) {
 
 /**
  * Normalize audio file format for MediaConvert compatibility
- * Converts any audio to standardized WAV or MP3 to ensure no codec issues
+ * Converts WAV files to AAC via FFmpeg to ensure no codec issues
  */
 async function normalizeAudioFile(s3Url, filename) {
-  // If already in S3 and is MP3 or AAC, use as-is (compatible with MediaConvert)
   const ext = filename.toLowerCase().split('.').pop();
+  
+  // If already in S3 and is MP3 or AAC, use as-is (compatible with MediaConvert)
   if (['mp3', 'aac', 'm4a'].includes(ext)) {
     console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible`);
     return s3Url;
   }
   
-  // For WAV and other formats, they should work but may need normalization
-  // MediaConvert is generally compatible, so just return as-is for now
-  // If issues arise, can implement FFmpeg re-encoding here
+  // For WAV files: Need to re-encode to AAC to ensure MediaConvert compatibility
+  if (ext === 'wav') {
+    console.log(`      ⚠️  WAV detected - re-encoding to AAC via FFmpeg...`);
+    try {
+      const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const tempWavPath = `/tmp/${audioId}_input.wav`;
+      const tempAacPath = `/tmp/${audioId}_output.aac`;
+      
+      // Download WAV from S3/Filemail
+      console.log(`      📥 Downloading WAV file...`);
+      const response = await fetch(s3Url);
+      if (!response.ok) throw new Error(`Download failed: ${response.statusCode}`);
+      const buffer = await response.buffer();
+      
+      // Write to temp file
+      await new Promise((resolve, reject) => {
+        fs.writeFile(tempWavPath, buffer, (err) => err ? reject(err) : resolve());
+      });
+      
+      // Re-encode WAV to AAC using FFmpeg
+      console.log(`      🔧 Re-encoding WAV to AAC...`);
+      await new Promise((resolve, reject) => {
+        execSync(`ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 "${tempAacPath}" -y 2>&1`, {
+          stdio: 'pipe'
+        });
+        resolve();
+      });
+      
+      // Upload AAC back to S3
+      console.log(`      📤 Uploading re-encoded AAC to S3...`);
+      const aacBuffer = fs.readFileSync(tempAacPath);
+      const s3Key = `audio/${audioId}/output.aac`;
+      
+      await awsS3Client.send(new PutObjectCommand({
+        Bucket: 'postready-staging',
+        Key: s3Key,
+        Body: aacBuffer,
+        ContentType: 'audio/aac'
+      }));
+      
+      const normalizedUrl = `s3://postready-staging/${s3Key}`;
+      console.log(`      ✅ AAC ready: ${normalizedUrl}`);
+      
+      // Clean up temp files
+      fs.unlinkSync(tempWavPath);
+      fs.unlinkSync(tempAacPath);
+      
+      return normalizedUrl;
+    } catch (err) {
+      console.warn(`      ⚠️  FFmpeg re-encoding failed: ${err.message}`);
+      console.log(`      Using original WAV (may have issues)...`);
+      return s3Url; // Fallback to original
+    }
+  }
+  
+  // Other formats - return as-is
   console.log(`      ✓ ${ext.toUpperCase()} format accepted`);
   return s3Url;
 }
+
 
 /**
  * Create and store a MediaConvert output preset in S3
