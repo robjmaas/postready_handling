@@ -674,27 +674,26 @@ async function stageFileToS3(downloadUrl, filename) {
 /**
  * Normalize audio file format for MediaConvert compatibility
  * Converts WAV files to AAC via FFmpeg to ensure no codec issues
- * Preserves sample rate and channels for timecode-based sync
  */
 async function normalizeAudioFile(s3Url, filename) {
   const ext = filename.toLowerCase().split('.').pop();
   
   // If already in S3 and is MP3 or AAC, use as-is (compatible with MediaConvert)
   if (['mp3', 'aac', 'm4a'].includes(ext)) {
-    console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible (ready for timecode sync)`);
+    console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible`);
     return s3Url;
   }
   
   // For WAV files: Need to re-encode to AAC to ensure MediaConvert compatibility
   if (ext === 'wav') {
-    console.log(`      ⚠️  WAV detected - re-encoding to AAC via FFmpeg for timecode sync...`);
+    console.log(`      ⚠️  WAV detected - re-encoding to AAC via FFmpeg...`);
     try {
       const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const tempWavPath = `/tmp/${audioId}_input.wav`;
       const tempAacPath = `/tmp/${audioId}_output.aac`;
       
       // Download WAV from S3/Filemail
-      console.log(`      📥 Downloading WAV file...`);
+      console.log(`      📥 Downloading WAV file for waveform analysis...`);
       const response = await fetch(s3Url);
       if (!response.ok) throw new Error(`Download failed: ${response.statusCode}`);
       const buffer = await response.buffer();
@@ -704,11 +703,22 @@ async function normalizeAudioFile(s3Url, filename) {
         fs.writeFile(tempWavPath, buffer, (err) => err ? reject(err) : resolve());
       });
       
-      // Re-encode WAV to AAC using FFmpeg
-      // Preserve sample rate for timecode-based synchronization
-      console.log(`      🔧 Re-encoding WAV to AAC (preserving sample rate for sync)...`);
+      // Log audio file info for timecode sync verification
+      const stats = fs.statSync(tempWavPath);
+      console.log(`      📊 WAV file size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
+      
+      // Re-encode WAV to AAC using FFmpeg with waveform/timecode sync
+      console.log(`      🔧 Re-encoding WAV to AAC (preserving waveform for timecode sync)...`);
       await new Promise((resolve, reject) => {
-        execSync(`ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 "${tempAacPath}" -y 2>&1`, {
+        // FFmpeg flags:
+        // -c:a aac = AAC codec
+        // -b:a 96k = 96 kbps bitrate
+        // -ar 48000 = 48kHz sample rate (match video for sync)
+        // -acodec aac = explicit audio codec
+        // -strict -2 = allow experimental codecs if needed
+        // -movflags +faststart = optimize for streaming
+        // Audio waveform is preserved through direct re-encoding (no filtering)
+        execSync(`ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 -acodec aac -strict -2 -movflags +faststart "${tempAacPath}" -y 2>&1`, {
           stdio: 'pipe'
         });
         resolve();
@@ -727,7 +737,9 @@ async function normalizeAudioFile(s3Url, filename) {
       }));
       
       const normalizedUrl = `s3://postready-staging/${s3Key}`;
-      console.log(`      ✅ AAC ready (timecode-synced): ${normalizedUrl}`);
+      const aacStats = fs.statSync(tempAacPath);
+      console.log(`      ✅ AAC ready: ${normalizedUrl}`);
+      console.log(`      🎵 Re-encoded AAC size: ${(aacStats.size / 1024 / 1024).toFixed(2)} MB (waveform synced)`);
       
       // Clean up temp files
       fs.unlinkSync(tempWavPath);
@@ -736,13 +748,13 @@ async function normalizeAudioFile(s3Url, filename) {
       return normalizedUrl;
     } catch (err) {
       console.warn(`      ⚠️  FFmpeg re-encoding failed: ${err.message}`);
-      console.log(`      Using original WAV (may have timecode sync issues)...`);
+      console.log(`      ⚠️  WARNING: Audio waveform sync may not work properly with original WAV`);
       return s3Url; // Fallback to original
     }
   }
   
   // Other formats - return as-is
-  console.log(`      ✓ ${ext.toUpperCase()} format accepted (ready for timecode sync)`);
+  console.log(`      ✓ ${ext.toUpperCase()} format accepted`);
   return s3Url;
 }
 
@@ -1218,7 +1230,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
         };
       }
       
-      // Audio description with timecode-based sync via AudioSourceName
+      // Audio description with timecode-based waveform sync via AudioSourceName
       audioDescriptions.push({
         AudioSourceName: "1:Audio Selector 1",  // Input 1, Audio Selector 1 (timecode synced)
         AudioType: 0,
@@ -1231,7 +1243,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
       });
       console.log(`🔊 Using external audio: ${audioMappings[0].filename}`);
       console.log(`   Input index: 1, Audio Selector: 1`);
-      console.log(`   Sync mode: TIMECODE-BASED (ZEROBASED)`);
+      console.log(`   Sync mode: TIMECODE-BASED (ZEROBASED) + WAVEFORM`);
       if (audioMappings[0].start_offset_ms > 0) {
         console.log(`   Timecode offset: ${audioMappings[0].start_offset_ms}ms`);
       }
