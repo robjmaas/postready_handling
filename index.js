@@ -1029,14 +1029,23 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     // Build audio descriptions (use first external audio if available, else use video audio)
     const audioDescriptions = [];
     if (audioMappings.length > 0) {
-      // Use first external audio
+      // Use first external audio (from input index 1) with codec settings
       audioDescriptions.push({
-        AudioSourceName: "Audio Selector 2"
+        AudioSourceName: "1:Audio Selector 2",
+        CodecSettings: {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000
+          }
+        }
       });
-      console.log(`🔊 Using external audio: ${audioMappings[0].filename}`);
+      console.log(`🔊 Using external audio: ${audioMappings[0].filename} (input index 1, Audio Selector 2)`);
     } else {
-      // Use video's original audio
+      // Use video's original audio (from input index 0, Audio Selector 1)
       audioDescriptions.push({
+        AudioSourceName: "Audio Selector 1",
         CodecSettings: {
           Codec: "AAC",
           AacSettings: {
