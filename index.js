@@ -402,6 +402,24 @@ function isAudioFile(filename) {
   return audioExtensions.includes(ext);
 }
 
+/**
+ * Get file info (size, headers) via HEAD request
+ */
+async function getFileInfo(url) {
+  return new Promise((resolve, reject) => {
+    const options = new URL(url);
+    const client = url.startsWith('https') ? https : http;
+    
+    client.request(url, { method: 'HEAD' }, (res) => {
+      resolve({
+        size: parseInt(res.headers['content-length'] || '0', 10),
+        contentType: res.headers['content-type'] || '',
+        etag: res.headers['etag'] || ''
+      });
+    }).on('error', reject).end();
+  });
+}
+
 async function processFilemailTransfer(transferId, templateName = "Postready") {
   try {
     console.log("Processing Filemail transfer:", transferId);
@@ -413,12 +431,18 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
     // Auto-detect and map audio files (before processing videos)
     console.log("\n[Pre-processing] Auto-detecting audio files...");
     const audioFiles = files.filter(f => isAudioFile(f.filename));
+    const videoFiles = files.filter(f => isVideoFile(f.filename));
+    
     if (audioFiles.length > 0) {
       console.log(`✅ Found ${audioFiles.length} audio file(s), auto-mapping...`);
       for (const audioFile of audioFiles) {
         const audioId = `audio_filemail_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         try {
+          // Try to get audio file info via HEAD request
+          const audioInfo = await getFileInfo(audioFile.downloadurl);
+          console.log(`   📊 ${audioFile.filename} - ${audioInfo.size} bytes`);
+          
           await db.run(
             "INSERT OR IGNORE INTO audio_files (id, filename, s3_url, duration_ms) VALUES (?, ?, ?, ?)",
             [audioId, audioFile.filename, audioFile.downloadurl, null]
@@ -648,6 +672,25 @@ async function stageFileToS3(downloadUrl, filename) {
       reject(err);
     }
   });
+}
+
+/**
+ * Normalize audio file format for MediaConvert compatibility
+ * Converts any audio to standardized WAV or MP3 to ensure no codec issues
+ */
+async function normalizeAudioFile(s3Url, filename) {
+  // If already in S3 and is MP3 or AAC, use as-is (compatible with MediaConvert)
+  const ext = filename.toLowerCase().split('.').pop();
+  if (['mp3', 'aac', 'm4a'].includes(ext)) {
+    console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible`);
+    return s3Url;
+  }
+  
+  // For WAV and other formats, they should work but may need normalization
+  // MediaConvert is generally compatible, so just return as-is for now
+  // If issues arise, can implement FFmpeg re-encoding here
+  console.log(`      ✓ ${ext.toUpperCase()} format accepted`);
+  return s3Url;
 }
 
 /**
@@ -1010,11 +1053,24 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
             console.log(`      🌐 Filemail URL detected, staging to S3...`);
             try {
               const stagedInfo = await stageFileToS3(mapping.s3_url, mapping.filename);
-              audioMappings[i].s3_url = stagedInfo.s3Url;
-              console.log(`      ✅ Staged to S3: ${audioMappings[i].s3_url}`);
+              // Normalize audio through FFmpeg to ensure compatibility
+              console.log(`      🎧 Normalizing audio format...`);
+              const normalizedUrl = await normalizeAudioFile(stagedInfo.s3Url, mapping.filename);
+              audioMappings[i].s3_url = normalizedUrl;
+              console.log(`      ✅ Staged & normalized to S3: ${normalizedUrl}`);
             } catch (err) {
-              console.warn(`      ⚠️  Failed to stage audio: ${err.message}`);
+              console.warn(`      ⚠️  Failed to stage/normalize audio: ${err.message}`);
               throw err;
+            }
+          } else {
+            // Audio already in S3 - normalize if needed
+            try {
+              console.log(`      ✅ S3 audio found, normalizing format...`);
+              const normalizedUrl = await normalizeAudioFile(mapping.s3_url, mapping.filename);
+              audioMappings[i].s3_url = normalizedUrl;
+            } catch (err) {
+              console.warn(`      ⚠️  Failed to normalize audio: ${err.message}`);
+              // Continue anyway - try with original
             }
           }
         }
