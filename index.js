@@ -396,6 +396,12 @@ function isVideoFile(filename) {
   return videoExtensions.includes(ext);
 }
 
+function isAudioFile(filename) {
+  const audioExtensions = ['.wav', '.mp3', '.aac', '.m4a', '.flac', '.ogg', '.wma', '.alac'];
+  const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
+  return audioExtensions.includes(ext);
+}
+
 async function processFilemailTransfer(transferId, templateName = "Postready") {
   try {
     console.log("Processing Filemail transfer:", transferId);
@@ -966,9 +972,25 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
       );
       if (audioMappings.length > 0) {
         console.log(`✅ Found ${audioMappings.length} audio file(s)`);
-        audioMappings.forEach((mapping, idx) => {
-          console.log(`   [${idx + 1}] ${mapping.filename} (offset: ${mapping.start_offset_ms}ms)`);
-        });
+        
+        // Process each audio file (stage Filemail URLs to S3 if needed)
+        for (let i = 0; i < audioMappings.length; i++) {
+          const mapping = audioMappings[i];
+          console.log(`   [${i + 1}] ${mapping.filename} (offset: ${mapping.start_offset_ms}ms)`);
+          
+          // If URL is Filemail (http), stage it to S3 first
+          if (mapping.s3_url.startsWith('http')) {
+            console.log(`      🌐 Filemail URL detected, staging to S3...`);
+            try {
+              const stagedInfo = await stageFileToS3(mapping.s3_url, mapping.filename);
+              audioMappings[i].s3_url = stagedInfo.s3Url;
+              console.log(`      ✅ Staged to S3: ${audioMappings[i].s3_url}`);
+            } catch (err) {
+              console.warn(`      ⚠️  Failed to stage audio: ${err.message}`);
+              throw err;
+            }
+          }
+        }
       } else {
         console.log(`ℹ️  No audio mappings found`);
       }
@@ -1654,24 +1676,108 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
     
     const files = await getFilemailFiles(transferId);
     const videoFiles = files.filter(f => isVideoFile(f.filename));
-    const nonVideoFiles = files.filter(f => !isVideoFile(f.filename));
+    const audioFiles = files.filter(f => isAudioFile(f.filename));
+    const otherFiles = files.filter(f => !isVideoFile(f.filename) && !isAudioFile(f.filename));
     
     res.json({
       transferId,
       summary: {
         totalFiles: files.length,
         videoFiles: videoFiles.length,
-        nonVideoFiles: nonVideoFiles.length
+        audioFiles: audioFiles.length,
+        otherFiles: otherFiles.length
       },
       videos: videoFiles.map(f => ({
         filename: f.filename,
         downloadurl: f.downloadurl,
         size: f.filesize
       })),
-      skipped: nonVideoFiles.map(f => f.filename)
+      audio: audioFiles.map(f => ({
+        filename: f.filename,
+        downloadurl: f.downloadurl,
+        size: f.filesize
+      })),
+      skipped: otherFiles.map(f => f.filename)
     });
   } catch (err) {
     console.error("Preview error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Auto-detect and map audio files from transfer
+ * POST /transfer/{transferId}/auto-detect-audio
+ * Scans Filemail transfer for .wav/.mp3/etc files and auto-maps them
+ */
+app.post("/transfer/:transferId/auto-detect-audio", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    console.log(`Auto-detecting audio files for transfer: ${transferId}`);
+
+    // Verify transfer exists
+    const transfer = await db.get("SELECT id FROM processed_transfers WHERE id = ?", [transferId]);
+    if (!transfer) {
+      return res.status(404).json({ error: "Transfer not found" });
+    }
+
+    // Fetch files from Filemail
+    const files = await getFilemailFiles(transferId);
+    const audioFiles = files.filter(f => isAudioFile(f.filename));
+
+    if (audioFiles.length === 0) {
+      return res.json({
+        success: true,
+        transferId,
+        audioFilesFound: 0,
+        message: "No audio files found in transfer",
+        mappings: []
+      });
+    }
+
+    console.log(`✅ Found ${audioFiles.length} audio file(s) in transfer`);
+
+    // Auto-map each audio file
+    const mappings = [];
+    for (const audioFile of audioFiles) {
+      const audioId = `audio_filemail_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      try {
+        // Store Filemail audio as downloadable audio reference
+        await db.run(
+          "INSERT INTO audio_files (id, filename, s3_url, duration_ms) VALUES (?, ?, ?, ?)",
+          [audioId, audioFile.filename, audioFile.downloadurl, null]
+        );
+
+        // Create mapping
+        await db.run(
+          "INSERT OR REPLACE INTO transfer_audio_mapping (id, transfer_id, audio_id, sync_mode, start_offset_ms) VALUES (?, ?, ?, ?, ?)",
+          [mappingId, transferId, audioId, "timecode", 0]
+        );
+
+        console.log(`   ✅ Mapped: ${audioFile.filename} (${audioId})`);
+        mappings.push({
+          audioId,
+          mappingId,
+          filename: audioFile.filename,
+          size: audioFile.filesize
+        });
+      } catch (err) {
+        console.warn(`   ⚠️  Failed to map ${audioFile.filename}: ${err.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      transferId,
+      audioFilesFound: audioFiles.length,
+      audioFilesMapped: mappings.length,
+      message: `Auto-mapped ${mappings.length} audio file(s)`,
+      mappings
+    });
+  } catch (err) {
+    console.error("Auto-detect audio error:", err);
     res.status(500).json({ error: err.message });
   }
 });
