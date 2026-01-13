@@ -274,11 +274,55 @@ To add features:
 ### External Audio Sync (Timecode-Based)
 
 **Overview:**
-Sync external audio files (interviews, ADR, music) with video using timecode. Both video and audio must have matching timecode references for proper sync.
+Sync external audio files (interviews, ADR, music) with video using timecode. Audio files can come from:
+1. **Manual upload** - Upload WAV/MP3 files via API
+2. **Filemail transfer** - Auto-detect .wav/.mp3 files in same transfer
+
+Both methods use timecode-based synchronization (ZEROBASED) for perfect sync.
 
 **Audio Management Endpoints:**
 
-#### 1. Upload Audio File
+#### 1. Preview Transfer (Shows Audio Files)
+```bash
+GET /preview/transfer/{transferId}
+```
+Returns:
+```json
+{
+  "summary": {
+    "totalFiles": 63,
+    "videoFiles": 59,
+    "audioFiles": 2,
+    "otherFiles": 2
+  },
+  "videos": [...],
+  "audio": [
+    {"filename": "interview.wav", "downloadurl": "...", "size": 120000000},
+    {"filename": "adlib.mp3", "downloadurl": "...", "size": 85000000}
+  ],
+  "skipped": [...]
+}
+```
+
+#### 2. Auto-Detect Audio from Transfer
+```bash
+POST /transfer/{transferId}/auto-detect-audio
+```
+Scans transfer for .wav/.mp3/aac/flac/ogg files and auto-maps them.
+Returns:
+```json
+{
+  "success": true,
+  "audioFilesFound": 2,
+  "audioFilesMapped": 2,
+  "mappings": [
+    {"filename": "interview.wav", "audioId": "audio_filemail_..."},
+    {"filename": "adlib.mp3", "audioId": "audio_filemail_..."}
+  ]
+}
+```
+
+#### 3. Upload Audio File (Manual)
 ```bash
 POST /audio/upload
 Headers:
@@ -290,13 +334,13 @@ Binary body: WAV/MP3/AAC audio file
 ```
 Returns: `{ audioId, filename, s3_url, ... }`
 
-#### 2. List Available Audio
+#### 4. List Available Audio
 ```bash
 GET /audio/list
 ```
 Shows all uploaded audio files with metadata.
 
-#### 3. Map Audio to Transfer
+#### 5. Map Audio to Transfer (Manual)
 ```bash
 POST /transfer/{transferId}/audio
 Body: {
@@ -306,19 +350,26 @@ Body: {
 ```
 Links external audio to a transfer. When transfer is processed, this audio replaces the video's original audio.
 
-#### 4. Get Audio Mappings
+#### 6. Get Audio Mappings
 ```bash
 GET /transfer/{transferId}/audio
 ```
 Shows all audio files mapped to a transfer.
 
-#### 5. Remove Audio Mapping
+#### 7. Remove Audio Mapping
 ```bash
 DELETE /transfer/{transferId}/audio/{audioId}
 ```
 Unlink audio from transfer (can revert to original audio).
 
-**Processing Flow with Audio:**
+**Processing Flow with Filemail Audio:**
+
+1. **Preview**: `GET /preview/transfer/{id}` → See audio files in transfer
+2. **Auto-map**: `POST /transfer/{id}/auto-detect-audio` → Scan and map all audio
+3. **Process**: `POST /process/transfer/{id}` → Auto-stages Filemail audio to S3
+4. **Output**: MP4 with external audio (timecode synced)
+
+**Processing Flow with Manual Audio Upload:**
 
 1. **Upload audio**: `POST /audio/upload` with WAV/MP3 binary
 2. **Get audio ID** from response
@@ -331,9 +382,24 @@ Unlink audio from transfer (can revert to original audio).
 - Audio and video must have **same or compatible timecode**
 - Both should use `ZEROBASED` timecode source
 - Audio duration should match or exceed video duration
-- Supported formats: WAV, MP3, AAC, M4A
+- Supported formats: WAV, MP3, AAC, M4A, FLAC, OGG, WMA, ALAC
 
-**Example Complete Workflow:**
+**Example: Filemail Audio Auto-Sync:**
+```bash
+# 1. Preview transfer (see audio files)
+curl https://postready-handling.fly.dev/preview/transfer/myTransferId
+
+# 2. Auto-detect and map audio
+curl -X POST https://postready-handling.fly.dev/transfer/myTransferId/auto-detect-audio
+
+# 3. Process transfer (audio auto-included)
+curl -X POST https://postready-handling.fly.dev/process/transfer/myTransferId
+
+# 4. Monitor
+curl https://postready-handling.fly.dev/db/jobs/myTransferId
+```
+
+**Example: Manual Audio Upload:**
 ```bash
 # 1. Upload interview audio
 curl -X POST http://localhost:3000/audio/upload \
@@ -362,7 +428,7 @@ curl http://localhost:3000/db/jobs/eeiayaytchrejoh
 audio_files:
   id TEXT PRIMARY KEY
   filename TEXT UNIQUE
-  s3_url TEXT
+  s3_url TEXT (S3 URL or Filemail HTTP URL)
   duration_ms INTEGER
   sample_rate INTEGER
   channels INTEGER
@@ -376,6 +442,13 @@ transfer_audio_mapping:
   start_offset_ms INTEGER
   created_at DATETIME
 ```
+
+**How It Works:**
+- Filemail URLs are stored as-is in `audio_files.s3_url`
+- During processing, Filemail URLs are auto-staged to S3
+- MediaConvert receives S3 URL for both video and audio
+- Both use ZEROBASED timecode source for frame-accurate sync
+- Output includes external audio instead of video's original audio
 
 ### When to Ask for Help
 
