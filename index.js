@@ -705,12 +705,14 @@ async function normalizeAudioFile(s3Url, filename) {
       
       // Re-encode WAV to AAC using FFmpeg
       console.log(`      🔧 Re-encoding WAV to AAC...`);
-      await new Promise((resolve, reject) => {
-        execSync(`ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 "${tempAacPath}" -y 2>&1`, {
-          stdio: 'pipe'
-        });
-        resolve();
-      });
+      try {
+        const ffmpegCmd = `ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 "${tempAacPath}" -y 2>&1`;
+        execSync(ffmpegCmd, { stdio: 'pipe' });
+        console.log(`      ✅ FFmpeg re-encoding completed`);
+      } catch (ffErr) {
+        console.error(`      ❌ FFmpeg error: ${ffErr.message}`);
+        throw ffErr;
+      }
       
       // Upload AAC back to S3
       console.log(`      📤 Uploading re-encoded AAC to S3...`);
