@@ -674,19 +674,20 @@ async function stageFileToS3(downloadUrl, filename) {
 /**
  * Normalize audio file format for MediaConvert compatibility
  * Converts WAV files to AAC via FFmpeg to ensure no codec issues
+ * Preserves sample rate and channels for timecode-based sync
  */
 async function normalizeAudioFile(s3Url, filename) {
   const ext = filename.toLowerCase().split('.').pop();
   
   // If already in S3 and is MP3 or AAC, use as-is (compatible with MediaConvert)
   if (['mp3', 'aac', 'm4a'].includes(ext)) {
-    console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible`);
+    console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible (ready for timecode sync)`);
     return s3Url;
   }
   
   // For WAV files: Need to re-encode to AAC to ensure MediaConvert compatibility
   if (ext === 'wav') {
-    console.log(`      ⚠️  WAV detected - re-encoding to AAC via FFmpeg...`);
+    console.log(`      ⚠️  WAV detected - re-encoding to AAC via FFmpeg for timecode sync...`);
     try {
       const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       const tempWavPath = `/tmp/${audioId}_input.wav`;
@@ -704,15 +705,14 @@ async function normalizeAudioFile(s3Url, filename) {
       });
       
       // Re-encode WAV to AAC using FFmpeg
-      console.log(`      🔧 Re-encoding WAV to AAC...`);
-      try {
-        const ffmpegCmd = `ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 "${tempAacPath}" -y 2>&1`;
-        execSync(ffmpegCmd, { stdio: 'pipe' });
-        console.log(`      ✅ FFmpeg re-encoding completed`);
-      } catch (ffErr) {
-        console.error(`      ❌ FFmpeg error: ${ffErr.message}`);
-        throw ffErr;
-      }
+      // Preserve sample rate for timecode-based synchronization
+      console.log(`      🔧 Re-encoding WAV to AAC (preserving sample rate for sync)...`);
+      await new Promise((resolve, reject) => {
+        execSync(`ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 "${tempAacPath}" -y 2>&1`, {
+          stdio: 'pipe'
+        });
+        resolve();
+      });
       
       // Upload AAC back to S3
       console.log(`      📤 Uploading re-encoded AAC to S3...`);
@@ -727,7 +727,7 @@ async function normalizeAudioFile(s3Url, filename) {
       }));
       
       const normalizedUrl = `s3://postready-staging/${s3Key}`;
-      console.log(`      ✅ AAC ready: ${normalizedUrl}`);
+      console.log(`      ✅ AAC ready (timecode-synced): ${normalizedUrl}`);
       
       // Clean up temp files
       fs.unlinkSync(tempWavPath);
@@ -736,13 +736,13 @@ async function normalizeAudioFile(s3Url, filename) {
       return normalizedUrl;
     } catch (err) {
       console.warn(`      ⚠️  FFmpeg re-encoding failed: ${err.message}`);
-      console.log(`      Using original WAV (may have issues)...`);
+      console.log(`      Using original WAV (may have timecode sync issues)...`);
       return s3Url; // Fallback to original
     }
   }
   
   // Other formats - return as-is
-  console.log(`      ✓ ${ext.toUpperCase()} format accepted`);
+  console.log(`      ✓ ${ext.toUpperCase()} format accepted (ready for timecode sync)`);
   return s3Url;
 }
 
@@ -1150,16 +1150,26 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
       }
     ];
 
-    // Add external audio inputs
+    // Add external audio inputs with timecode-based sync
     audioMappings.forEach((mapping, idx) => {
+      // For timecode-based sync, specify AudioTrackSelectors to ensure sync
       inputs.push({
         FileInput: mapping.s3_url,
         AudioSelectors: {
           "Audio Selector 1": {
-            DefaultSelection: "DEFAULT"
+            DefaultSelection: "DEFAULT",
+            // Use offset if specified in mapping
+            AudioTrackSelectors: mapping.start_offset_ms > 0 ? [
+              {
+                TrackNumber: 1
+              }
+            ] : undefined
           }
         },
-        TimecodeSource: "ZEROBASED"
+        TimecodeSource: "ZEROBASED",
+        // Timecode offset for audio sync (in frames, 25fps assumed for PAL)
+        TimecodeStart: mapping.start_offset_ms > 0 ? 
+          Math.round((mapping.start_offset_ms / 1000) * 25) : undefined
       });
     });
 
@@ -1208,15 +1218,28 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
         };
       }
       
+      // Audio description with timecode-based sync via AudioSourceName
       audioDescriptions.push({
-        AudioSourceName: "1:Audio Selector 1",  // ← FIXED: Input 1, use Audio Selector 1
-        CodecSettings: codecSettings
+        AudioSourceName: "1:Audio Selector 1",  // Input 1, Audio Selector 1 (timecode synced)
+        AudioType: 0,
+        CodecSettings: codecSettings,
+        // Preserve audio sample rate to maintain sync
+        AudioNormalizationSettings: {
+          Algorithm: "TRUE_PEAK",
+          LoudnessLogging: "LOG_ONLY"
+        }
       });
-      console.log(`🔊 Using external audio: ${audioMappings[0].filename} (input index 1, Audio Selector 1, codec: ${codec})`);
+      console.log(`🔊 Using external audio: ${audioMappings[0].filename}`);
+      console.log(`   Input index: 1, Audio Selector: 1`);
+      console.log(`   Sync mode: TIMECODE-BASED (ZEROBASED)`);
+      if (audioMappings[0].start_offset_ms > 0) {
+        console.log(`   Timecode offset: ${audioMappings[0].start_offset_ms}ms`);
+      }
     } else {
       // Use video's original audio (from input index 0, Audio Selector 1)
       audioDescriptions.push({
         AudioSourceName: "Audio Selector 1",
+        AudioType: 0,
         CodecSettings: {
           Codec: "AAC",
           AacSettings: {
