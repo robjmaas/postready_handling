@@ -198,6 +198,28 @@ async function initDb() {
       value TEXT,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS audio_files (
+      id TEXT PRIMARY KEY,
+      filename TEXT UNIQUE,
+      s3_url TEXT,
+      duration_ms INTEGER,
+      sample_rate INTEGER,
+      channels INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS transfer_audio_mapping (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT,
+      audio_id TEXT,
+      sync_mode TEXT DEFAULT 'timecode',
+      start_offset_ms INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(transfer_id) REFERENCES processed_transfers(id),
+      FOREIGN KEY(audio_id) REFERENCES audio_files(id),
+      UNIQUE(transfer_id, audio_id)
+    );
   `);
 
   // Add metadata column if it doesn't exist (for S3 staging key storage)
@@ -418,7 +440,7 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
         console.log(`🚀 Submitting to AWS MediaConvert with template: ${templateName}`);
         try {
           console.log(`   Attempting MediaConvert submission...`);
-          result = await sendToMediaConvert(file.downloadurl, file.filename, templateName);
+          result = await sendToMediaConvert(file.downloadurl, file.filename, templateName, transferId);
           // Store MediaConvert job in database
           await storeMediaConvertJob(result.id, transferId, file.filename, result.stagingKey);
           console.log(`✅ MediaConvert job stored: ${result.id}`);
@@ -905,7 +927,7 @@ async function cleanupS3Staging(stagingKey) {
  * Submit video to AWS MediaConvert using a job template
  * Stages file to S3 first, then creates job from template
  */
-async function sendToMediaConvert(downloadUrl, filename, templateName = "Postready") {
+async function sendToMediaConvert(downloadUrl, filename, templateName = "Postready", transferId = null) {
   console.log(`\n${'='.repeat(60)}`);
   console.log(`📡 MEDIACONVERT SUBMISSION START`);
   console.log(`${'='.repeat(60)}`);
@@ -927,14 +949,83 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
   
   try {
     // Stage file to S3
-    console.log(`\n[Step 1/2] Staging file to S3...`);
+    console.log(`\n[Step 1/3] Staging video to S3...`);
     stagingInfo = await stageFileToS3(downloadUrl, filename);
     console.log(`✅ S3 staging complete`);
     const fileInput = stagingInfo.s3Url;
     console.log(`   Input: ${fileInput}`);
     
+    // Fetch audio mappings if transfer is specified
+    let audioInputs = [];
+    let audioMappings = [];
+    if (transferId) {
+      console.log(`\n[Step 2/3] Checking for mapped audio files...`);
+      audioMappings = await db.all(
+        "SELECT tm.id, tm.audio_id, tm.start_offset_ms, af.s3_url, af.filename FROM transfer_audio_mapping tm JOIN audio_files af ON tm.audio_id = af.id WHERE tm.transfer_id = ?",
+        [transferId]
+      );
+      if (audioMappings.length > 0) {
+        console.log(`✅ Found ${audioMappings.length} audio file(s)`);
+        audioMappings.forEach((mapping, idx) => {
+          console.log(`   [${idx + 1}] ${mapping.filename} (offset: ${mapping.start_offset_ms}ms)`);
+        });
+      } else {
+        console.log(`ℹ️  No audio mappings found`);
+      }
+    }
+    
     // Create job with 3D LUT at Settings level (correct structure)
-    console.log(`\n[Step 2/2] Creating MediaConvert job with CUBE LUT color grading...`);
+    console.log(`\n[Step 3/3] Creating MediaConvert job...`);
+    
+    // Build inputs array (video + audio)
+    const inputs = [
+      {
+        FileInput: fileInput,
+        AudioSelectors: {
+          "Audio Selector 1": {
+            DefaultSelection: "DEFAULT"
+          }
+        },
+        VideoSelector: {},
+        TimecodeSource: "ZEROBASED"
+      }
+    ];
+
+    // Add external audio inputs
+    audioMappings.forEach((mapping, idx) => {
+      inputs.push({
+        FileInput: mapping.s3_url,
+        AudioSelectors: {
+          [`Audio Selector ${idx + 2}`]: {
+            DefaultSelection: "DEFAULT"
+          }
+        },
+        TimecodeSource: "ZEROBASED"
+      });
+    });
+
+    // Build audio descriptions (use first external audio if available, else use video audio)
+    const audioDescriptions = [];
+    if (audioMappings.length > 0) {
+      // Use first external audio
+      audioDescriptions.push({
+        AudioSourceName: "Audio Selector 2"
+      });
+      console.log(`🔊 Using external audio: ${audioMappings[0].filename}`);
+    } else {
+      // Use video's original audio
+      audioDescriptions.push({
+        CodecSettings: {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000
+          }
+        }
+      });
+    }
+
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       Settings: {
@@ -975,18 +1066,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                     }
                   }
                 },
-                AudioDescriptions: [
-                  {
-                    CodecSettings: {
-                      Codec: "AAC",
-                      AacSettings: {
-                        Bitrate: 96000,
-                        CodingMode: "CODING_MODE_2_0",
-                        SampleRate: 48000
-                      }
-                    }
-                  }
-                ]
+                AudioDescriptions: audioDescriptions
               }
             ],
             OutputGroupSettings: {
@@ -997,18 +1077,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
             }
           }
         ],
-        Inputs: [
-          {
-            FileInput: fileInput,
-            AudioSelectors: {
-              "Audio Selector 1": {
-                DefaultSelection: "DEFAULT"
-              }
-            },
-            VideoSelector: {},
-            TimecodeSource: "ZEROBASED"
-          }
-        ]
+        Inputs: inputs
       },
       AccelerationSettings: {
         Mode: "DISABLED"
@@ -1026,6 +1095,9 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     console.log(`   Template: ${templateName}`);
     console.log(`   Output: s3://postready-staging/outputs/`);
     console.log(`   🎨 3D LUT: s3://postready-staging/Awsome1.cube (ColorConversion3DLUTSettings)`);
+    if (audioMappings.length > 0) {
+      console.log(`   🔊 Audio: ${audioMappings[0].filename} (timecode synced)`);
+    }
     console.log(`${'='.repeat(60)}\n`);
     
     return {
@@ -1640,6 +1712,192 @@ app.post("/process/transfer/:transferId", async (req, res) => {
     });
   } catch (err) {
     console.error("Process error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Audio Management Endpoints
+ */
+
+/**
+ * List available audio files
+ */
+app.get("/audio/list", async (req, res) => {
+  try {
+    const audioFiles = await db.all("SELECT id, filename, duration_ms, sample_rate, channels, created_at FROM audio_files ORDER BY created_at DESC");
+    res.json({
+      success: true,
+      count: audioFiles.length,
+      audioFiles
+    });
+  } catch (err) {
+    console.error("Audio list error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Upload audio file (binary)
+ * POST /audio/upload
+ * Headers: x-filename, x-duration-ms (optional), x-sample-rate (optional), x-channels (optional)
+ */
+app.post("/audio/upload", async (req, res) => {
+  try {
+    const filename = req.headers["x-filename"];
+    const durationMs = parseInt(req.headers["x-duration-ms"]) || null;
+    const sampleRate = parseInt(req.headers["x-sample-rate"]) || null;
+    const channels = parseInt(req.headers["x-channels"]) || null;
+
+    if (!filename) {
+      return res.status(400).json({ error: "x-filename header required" });
+    }
+
+    // Collect binary data
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    
+    req.on("end", async () => {
+      try {
+        const buffer = Buffer.concat(chunks);
+        const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const s3Key = `audio/${filename}`;
+
+        // Upload to S3
+        const uploadCommand = new PutObjectCommand({
+          Bucket: "postready-staging",
+          Key: s3Key,
+          Body: buffer,
+          ContentType: "audio/wav"
+        });
+        await awsS3Client.send(uploadCommand);
+
+        const s3Url = `s3://postready-staging/${s3Key}`;
+
+        // Save to database
+        await db.run(
+          "INSERT INTO audio_files (id, filename, s3_url, duration_ms, sample_rate, channels) VALUES (?, ?, ?, ?, ?, ?)",
+          [audioId, filename, s3Url, durationMs, sampleRate, channels]
+        );
+
+        console.log(`✅ Audio uploaded: ${filename} (${buffer.length} bytes)`);
+        res.json({
+          success: true,
+          audioId,
+          filename,
+          s3Url,
+          durationMs,
+          sampleRate,
+          channels
+        });
+      } catch (err) {
+        console.error("Audio upload error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+  } catch (err) {
+    console.error("Audio upload error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Map audio to transfer (for timecode-based sync)
+ * POST /transfer/{transferId}/audio
+ */
+app.post("/transfer/:transferId/audio", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { audioId, startOffsetMs } = req.body;
+
+    if (!audioId) {
+      return res.status(400).json({ error: "audioId required in body" });
+    }
+
+    // Verify audio exists
+    const audio = await db.get("SELECT id FROM audio_files WHERE id = ?", [audioId]);
+    if (!audio) {
+      return res.status(404).json({ error: "Audio file not found" });
+    }
+
+    // Verify transfer exists
+    const transfer = await db.get("SELECT id FROM processed_transfers WHERE id = ?", [transferId]);
+    if (!transfer) {
+      return res.status(404).json({ error: "Transfer not found" });
+    }
+
+    const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Create mapping
+    await db.run(
+      "INSERT OR REPLACE INTO transfer_audio_mapping (id, transfer_id, audio_id, sync_mode, start_offset_ms) VALUES (?, ?, ?, ?, ?)",
+      [mappingId, transferId, audioId, "timecode", startOffsetMs || 0]
+    );
+
+    console.log(`✅ Audio mapped to transfer: ${transferId} <- ${audioId}`);
+    res.json({
+      success: true,
+      message: "Audio mapped to transfer",
+      mappingId,
+      transferId,
+      audioId,
+      startOffsetMs: startOffsetMs || 0
+    });
+  } catch (err) {
+    console.error("Audio mapping error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Get audio mapping for transfer
+ * GET /transfer/{transferId}/audio
+ */
+app.get("/transfer/:transferId/audio", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const mappings = await db.all(
+      "SELECT tm.id, tm.transfer_id, tm.audio_id, tm.sync_mode, tm.start_offset_ms, af.filename, af.s3_url, af.duration_ms FROM transfer_audio_mapping tm LEFT JOIN audio_files af ON tm.audio_id = af.id WHERE tm.transfer_id = ?",
+      [transferId]
+    );
+
+    res.json({
+      success: true,
+      transferId,
+      audioMappings: mappings
+    });
+  } catch (err) {
+    console.error("Audio mapping query error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Remove audio mapping
+ * DELETE /transfer/{transferId}/audio/{audioId}
+ */
+app.delete("/transfer/:transferId/audio/:audioId", async (req, res) => {
+  try {
+    const { transferId, audioId } = req.params;
+    
+    const result = await db.run(
+      "DELETE FROM transfer_audio_mapping WHERE transfer_id = ? AND audio_id = ?",
+      [transferId, audioId]
+    );
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: "Audio mapping not found" });
+    }
+
+    console.log(`✅ Audio removed from transfer: ${transferId}`);
+    res.json({
+      success: true,
+      message: "Audio mapping removed",
+      transferId,
+      audioId
+    });
+  } catch (err) {
+    console.error("Audio removal error:", err);
     res.status(500).json({ error: err.message });
   }
 });
