@@ -271,6 +271,112 @@ To add features:
 - Templates managed via `/api/job-templates` endpoints
 - Auto-recreated on deployment to ensure latest settings
 
+### External Audio Sync (Timecode-Based)
+
+**Overview:**
+Sync external audio files (interviews, ADR, music) with video using timecode. Both video and audio must have matching timecode references for proper sync.
+
+**Audio Management Endpoints:**
+
+#### 1. Upload Audio File
+```bash
+POST /audio/upload
+Headers:
+  x-filename: interview_20260112.wav
+  x-duration-ms: 120000 (optional)
+  x-sample-rate: 48000 (optional)
+  x-channels: 2 (optional)
+Binary body: WAV/MP3/AAC audio file
+```
+Returns: `{ audioId, filename, s3_url, ... }`
+
+#### 2. List Available Audio
+```bash
+GET /audio/list
+```
+Shows all uploaded audio files with metadata.
+
+#### 3. Map Audio to Transfer
+```bash
+POST /transfer/{transferId}/audio
+Body: {
+  "audioId": "audio_1234567890_abc123",
+  "startOffsetMs": 0
+}
+```
+Links external audio to a transfer. When transfer is processed, this audio replaces the video's original audio.
+
+#### 4. Get Audio Mappings
+```bash
+GET /transfer/{transferId}/audio
+```
+Shows all audio files mapped to a transfer.
+
+#### 5. Remove Audio Mapping
+```bash
+DELETE /transfer/{transferId}/audio/{audioId}
+```
+Unlink audio from transfer (can revert to original audio).
+
+**Processing Flow with Audio:**
+
+1. **Upload audio**: `POST /audio/upload` with WAV/MP3 binary
+2. **Get audio ID** from response
+3. **Map to transfer**: `POST /transfer/{transferId}/audio` with audioId
+4. **Process transfer**: `POST /process/transfer/{transferId}`
+5. **MediaConvert merges**: Video + mapped external audio (timecode synced)
+6. **Output**: MP4 with external audio (original video audio dropped)
+
+**Requirements:**
+- Audio and video must have **same or compatible timecode**
+- Both should use `ZEROBASED` timecode source
+- Audio duration should match or exceed video duration
+- Supported formats: WAV, MP3, AAC, M4A
+
+**Example Complete Workflow:**
+```bash
+# 1. Upload interview audio
+curl -X POST http://localhost:3000/audio/upload \
+  -H "x-filename: interview_20260112.wav" \
+  -H "x-sample-rate: 48000" \
+  -H "x-channels: 2" \
+  --data-binary @interview.wav
+
+# Get audioId from response (e.g., audio_1234567890_abc123)
+
+# 2. Map to transfer
+curl -X POST http://localhost:3000/transfer/eeiayaytchrejoh/audio \
+  -H "Content-Type: application/json" \
+  -d '{"audioId": "audio_1234567890_abc123", "startOffsetMs": 0}'
+
+# 3. Process transfer (audio auto-included)
+curl -X POST http://localhost:3000/process/transfer/eeiayaytchrejoh
+
+# 4. Monitor (check logs or database)
+curl http://localhost:3000/db/jobs/eeiayaytchrejoh
+```
+
+**Database Schema:**
+
+```sql
+audio_files:
+  id TEXT PRIMARY KEY
+  filename TEXT UNIQUE
+  s3_url TEXT
+  duration_ms INTEGER
+  sample_rate INTEGER
+  channels INTEGER
+  created_at DATETIME
+
+transfer_audio_mapping:
+  id TEXT PRIMARY KEY
+  transfer_id TEXT (FK)
+  audio_id TEXT (FK)
+  sync_mode TEXT ('timecode')
+  start_offset_ms INTEGER
+  created_at DATETIME
+```
+
 ### When to Ask for Help
 
 - Coconut API response format changes
@@ -278,5 +384,4 @@ To add features:
 - Frame.io project configuration
 - Wasabi bucket credentials or region
 - Adding new external integrations
-
-
+- Audio sync issues or timecode mismatches
