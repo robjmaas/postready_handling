@@ -1098,7 +1098,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
       inputs.push({
         FileInput: mapping.s3_url,
         AudioSelectors: {
-          [`Audio Selector ${idx + 2}`]: {
+          "Audio Selector 1": {
             DefaultSelection: "DEFAULT"
           }
         },
@@ -1152,10 +1152,10 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
       }
       
       audioDescriptions.push({
-        AudioSourceName: "1:Audio Selector 2",
+        AudioSourceName: "1:Audio Selector 1",  // ← FIXED: Input 1, use Audio Selector 1
         CodecSettings: codecSettings
       });
-      console.log(`🔊 Using external audio: ${audioMappings[0].filename} (input index 1, Audio Selector 2, codec: ${codec})`);
+      console.log(`🔊 Using external audio: ${audioMappings[0].filename} (input index 1, Audio Selector 1, codec: ${codec})`);
     } else {
       // Use video's original audio (from input index 0, Audio Selector 1)
       audioDescriptions.push({
