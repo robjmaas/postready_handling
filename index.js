@@ -410,6 +410,32 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
     console.log("Fetching Filemail files...");
     const files = await getFilemailFiles(transferId);
 
+    // Auto-detect and map audio files (before processing videos)
+    console.log("\n[Pre-processing] Auto-detecting audio files...");
+    const audioFiles = files.filter(f => isAudioFile(f.filename));
+    if (audioFiles.length > 0) {
+      console.log(`✅ Found ${audioFiles.length} audio file(s), auto-mapping...`);
+      for (const audioFile of audioFiles) {
+        const audioId = `audio_filemail_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        try {
+          await db.run(
+            "INSERT OR IGNORE INTO audio_files (id, filename, s3_url, duration_ms) VALUES (?, ?, ?, ?)",
+            [audioId, audioFile.filename, audioFile.downloadurl, null]
+          );
+          await db.run(
+            "INSERT OR IGNORE INTO transfer_audio_mapping (id, transfer_id, audio_id, sync_mode, start_offset_ms) VALUES (?, ?, ?, ?, ?)",
+            [mappingId, transferId, audioId, "timecode", 0]
+          );
+          console.log(`   ✅ Mapped: ${audioFile.filename}`);
+        } catch (err) {
+          console.warn(`   ⚠️  Failed to map ${audioFile.filename}: ${err.message}`);
+        }
+      }
+    } else {
+      console.log(`ℹ️  No audio files found in transfer`);
+    }
+
     // Filter to video files only
     const videoFiles = files.filter(f => isVideoFile(f.filename));
     
@@ -420,7 +446,8 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
     console.log(`Transfer ID: ${transferId}`);
     console.log(`Total files: ${files.length}`);
     console.log(`Video files to process: ${videoFiles.length}`);
-    console.log(`Non-video files (skipped): ${files.length - videoFiles.length}`);
+    console.log(`Audio files auto-mapped: ${audioFiles.length}`);
+    console.log(`Non-video, non-audio files: ${files.length - videoFiles.length - audioFiles.length}`);
     console.log(`Transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
     console.log(`Job Template: ${templateName}`);
     console.log("=".repeat(60) + "\n");
