@@ -1112,19 +1112,53 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     // Build audio descriptions (use first external audio if available, else use video audio)
     const audioDescriptions = [];
     if (audioMappings.length > 0) {
-      // Use first external audio (from input index 1) with codec settings
-      audioDescriptions.push({
-        AudioSourceName: "1:Audio Selector 2",
-        CodecSettings: {
+      // Use first external audio (from input index 1)
+      // Auto-detect best codec based on file format
+      const audioFileExt = audioMappings[0].filename.toLowerCase().split('.').pop();
+      let codec, codecSettings;
+      
+      if (audioFileExt === 'wav') {
+        // WAV files: use AAC with MPEG4 spec for maximum compatibility
+        codec = "AAC";
+        codecSettings = {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000,
+            RawFormat: "NONE",
+            Specification: "MPEG4"
+          }
+        };
+      } else if (['mp3', 'aac', 'm4a'].includes(audioFileExt)) {
+        // MP3/AAC/M4A: encode as AAC
+        codec = "AAC";
+        codecSettings = {
           Codec: "AAC",
           AacSettings: {
             Bitrate: 96000,
             CodingMode: "CODING_MODE_2_0",
             SampleRate: 48000
           }
-        }
+        };
+      } else {
+        // Default: AAC
+        codec = "AAC";
+        codecSettings = {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000
+          }
+        };
+      }
+      
+      audioDescriptions.push({
+        AudioSourceName: "1:Audio Selector 2",
+        CodecSettings: codecSettings
       });
-      console.log(`🔊 Using external audio: ${audioMappings[0].filename} (input index 1, Audio Selector 2)`);
+      console.log(`🔊 Using external audio: ${audioMappings[0].filename} (input index 1, Audio Selector 2, codec: ${codec})`);
     } else {
       // Use video's original audio (from input index 0, Audio Selector 1)
       audioDescriptions.push({
