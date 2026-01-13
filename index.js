@@ -694,7 +694,18 @@ async function normalizeAudioFile(s3Url, filename) {
       
       // Download WAV from S3/Filemail
       console.log(`      📥 Downloading WAV file for waveform analysis...`);
-      const response = await fetch(s3Url);
+      
+      // Convert S3 URL to HTTP URL if needed
+      let fetchUrl = s3Url;
+      if (s3Url.startsWith('s3://')) {
+        // Convert s3://bucket/key to https://bucket.s3.amazonaws.com/key
+        const parts = s3Url.replace('s3://', '').split('/');
+        const bucket = parts[0];
+        const key = parts.slice(1).join('/');
+        fetchUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
+      }
+      
+      const response = await fetch(fetchUrl);
       if (!response.ok) throw new Error(`Download failed: ${response.statusCode}`);
       const buffer = await response.buffer();
       
