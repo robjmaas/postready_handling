@@ -460,9 +460,6 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
       console.log(`ℹ️  No audio files found in transfer`);
     }
 
-    // Filter to video files only
-    const videoFiles = files.filter(f => isVideoFile(f.filename));
-    
     // Show summary before processing
     console.log("\n" + "=".repeat(60));
     console.log("📋 TRANSFER SUMMARY");
