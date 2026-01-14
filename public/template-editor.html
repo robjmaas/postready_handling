@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediaConvert Job Template Editor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .section {
+            margin-bottom: 40px;
+            border-left: 4px solid #667eea;
+            padding-left: 20px;
+        }
+        
+        .section h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .section h2::before {
+            content: '';
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            margin-right: 12px;
+            margin-left: -28px;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        label {
+            display: block;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        input[type="number"],
+        input[type="text"],
+        select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: border-color 0.2s;
+        }
+        
+        input[type="number"]:focus,
+        input[type="text"]:focus,
+        select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        @media (max-width: 640px) {
+            .form-row {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .help-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 6px;
+        }
+        
+        .button-group {
+            display: flex;
+            gap: 12px;
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+        
+        button {
+            padding: 12px 28px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+        
+        .btn-save {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            flex: 1;
+        }
+        
+        .btn-save:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        
+        .btn-save:active {
+            transform: translateY(0);
+        }
+        
+        .btn-reset {
+            background: #f0f0f0;
+            color: #333;
+        }
+        
+        .btn-reset:hover {
+            background: #e0e0e0;
+        }
+        
+        .status {
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: none;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+            display: block;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+            display: block;
+        }
+        
+        .status.loading {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+            display: block;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(0, 0, 0, 0.1);
+            border-radius: 50%;
+            border-top-color: currentColor;
+            animation: spin 0.8s linear infinite;
+            margin-right: 8px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📹 MediaConvert Template Editor</h1>
+            <p>Configure video encoding, audio, and output settings</p>
+        </div>
+        
+        <div class="content">
+            <div id="status" class="status"></div>
+            
+            <form id="templateForm">
+                <!-- Video Settings -->
+                <div class="section">
+                    <h2>Video Settings</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="videoWidth">Width (pixels)</label>
+                            <input type="number" id="videoWidth" name="videoWidth" value="1280" min="320" step="10">
+                            <div class="help-text">Resolution width for output video</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="videoHeight">Height (pixels)</label>
+                            <input type="number" id="videoHeight" name="videoHeight" value="720" min="180" step="10">
+                            <div class="help-text">Resolution height for output video</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="videoBitrate">Video Bitrate (kbps)</label>
+                            <input type="number" id="videoBitrate" name="videoBitrate" value="2000" min="500" step="100">
+                            <div class="help-text">QVBR quality-based bitrate</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="videoCodec">Video Codec</label>
+                            <select id="videoCodec" name="videoCodec">
+                                <option value="H_264">H.264</option>
+                                <option value="H_265">H.265 (HEVC)</option>
+                                <option value="VP8">VP8</option>
+                                <option value="VP9">VP9</option>
+                            </select>
+                            <div class="help-text">Video compression codec</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Audio Settings -->
+                <div class="section">
+                    <h2>Audio Settings</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="audioBitrate">Audio Bitrate (kbps)</label>
+                            <input type="number" id="audioBitrate" name="audioBitrate" value="96" min="48" max="320" step="8">
+                            <div class="help-text">Audio stream bitrate</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="audioSampleRate">Sample Rate (Hz)</label>
+                            <select id="audioSampleRate" name="audioSampleRate">
+                                <option value="44100">44.1 kHz</option>
+                                <option value="48000" selected>48 kHz (Professional)</option>
+                                <option value="96000">96 kHz</option>
+                            </select>
+                            <div class="help-text">Audio sample rate</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="audioCodec">Audio Codec</label>
+                            <select id="audioCodec" name="audioCodec">
+                                <option value="AAC" selected>AAC</option>
+                                <option value="MP3">MP3</option>
+                                <option value="PCM">PCM (Uncompressed)</option>
+                            </select>
+                            <div class="help-text">Audio compression codec</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="audioChannels">Channels</label>
+                            <select id="audioChannels" name="audioChannels">
+                                <option value="CODING_MODE_1_0">Mono</option>
+                                <option value="CODING_MODE_2_0" selected>Stereo</option>
+                                <option value="CODING_MODE_5_1">5.1 Surround</option>
+                            </select>
+                            <div class="help-text">Audio channel configuration</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Color Grading -->
+                <div class="section">
+                    <h2>Color Grading</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="colorInputSpace">Input Color Space</label>
+                            <select id="colorInputSpace" name="colorInputSpace">
+                                <option value="REC_709" selected>Rec. 709</option>
+                                <option value="REC_2020">Rec. 2020</option>
+                                <option value="LOG_C">Log C</option>
+                            </select>
+                            <div class="help-text">Input video color space</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="colorOutputSpace">Output Color Space</label>
+                            <select id="colorOutputSpace" name="colorOutputSpace">
+                                <option value="REC_709">Rec. 709</option>
+                                <option value="REC_2020">Rec. 2020</option>
+                                <option value="P3DCI" selected>DCI-P3</option>
+                            </select>
+                            <div class="help-text">Output video color space</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="enableLUT">
+                            <input type="checkbox" id="enableLUT" name="enableLUT" checked style="width: auto; margin-right: 8px;">
+                            Enable Cube LUT Color Grading
+                        </label>
+                        <div class="help-text">Apply 3D LUT file for color grading</div>
+                    </div>
+                </div>
+                
+                <!-- Timecode Settings -->
+                <div class="section">
+                    <h2>Timecode & Sync</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="timecodeSource">Timecode Source</label>
+                            <select id="timecodeSource" name="timecodeSource">
+                                <option value="ZEROBASED" selected>Zero-Based</option>
+                                <option value="EMBEDDED">Embedded</option>
+                            </select>
+                            <div class="help-text">Source of timecode for sync</div>
+                        </div>
+                        <div class="form-group">
+                            <label for="audioSync">
+                                <input type="checkbox" id="audioSync" name="audioSync" checked style="width: auto; margin-right: 8px;">
+                                Timecode-Based Audio Sync
+                            </label>
+                            <div class="help-text">Sync external audio by timecode</div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="timecodeFormat">Timecode Format</label>
+                        <select id="timecodeFormat" name="timecodeFormat">
+                            <option value="DROPFRAME">Drop Frame (29.97fps)</option>
+                            <option value="NONDROPFRAME" selected>Non-Drop Frame</option>
+                        </select>
+                        <div class="help-text">SMPTE timecode format</div>
+                    </div>
+                </div>
+                
+                <!-- Action Buttons -->
+                <div class="button-group">
+                    <button type="submit" class="btn-save">💾 Save Settings</button>
+                    <button type="reset" class="btn-reset">↻ Reset to Defaults</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        const form = document.getElementById('templateForm');
+        const statusDiv = document.getElementById('status');
+        
+        // Load settings on page load
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadSettings();
+        });
+        
+        // Load current template settings
+        async function loadSettings() {
+            try {
+                showStatus('Loading template settings...', 'loading');
+                const response = await fetch('/api/template/settings');
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Populate form with current values
+                    const settings = data.settings;
+                    document.getElementById('videoWidth').value = settings.videoWidth || 1280;
+                    document.getElementById('videoHeight').value = settings.videoHeight || 720;
+                    document.getElementById('videoBitrate').value = settings.videoBitrate || 2000;
+                    document.getElementById('videoCodec').value = settings.videoCodec || 'H_264';
+                    document.getElementById('audioBitrate').value = settings.audioBitrate || 96;
+                    document.getElementById('audioSampleRate').value = settings.audioSampleRate || 48000;
+                    document.getElementById('audioCodec').value = settings.audioCodec || 'AAC';
+                    document.getElementById('audioChannels').value = settings.audioChannels || 'CODING_MODE_2_0';
+                    document.getElementById('colorInputSpace').value = settings.colorInputSpace || 'REC_709';
+                    document.getElementById('colorOutputSpace').value = settings.colorOutputSpace || 'P3DCI';
+                    document.getElementById('enableLUT').checked = settings.enableLUT !== false;
+                    document.getElementById('timecodeSource').value = settings.timecodeSource || 'ZEROBASED';
+                    document.getElementById('audioSync').checked = settings.audioSync !== false;
+                    document.getElementById('timecodeFormat').value = settings.timecodeFormat || 'NONDROPFRAME';
+                    
+                    showStatus('✅ Settings loaded successfully', 'success');
+                    setTimeout(() => hideStatus(), 3000);
+                } else {
+                    showStatus('⚠️ ' + (data.message || 'Failed to load settings'), 'error');
+                }
+            } catch (err) {
+                showStatus('❌ Error: ' + err.message, 'error');
+            }
+        }
+        
+        // Save settings on form submit
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            try {
+                showStatus('Saving template settings...', 'loading');
+                
+                const settings = {
+                    videoWidth: parseInt(document.getElementById('videoWidth').value),
+                    videoHeight: parseInt(document.getElementById('videoHeight').value),
+                    videoBitrate: parseInt(document.getElementById('videoBitrate').value),
+                    videoCodec: document.getElementById('videoCodec').value,
+                    audioBitrate: parseInt(document.getElementById('audioBitrate').value),
+                    audioSampleRate: parseInt(document.getElementById('audioSampleRate').value),
+                    audioCodec: document.getElementById('audioCodec').value,
+                    audioChannels: document.getElementById('audioChannels').value,
+                    colorInputSpace: document.getElementById('colorInputSpace').value,
+                    colorOutputSpace: document.getElementById('colorOutputSpace').value,
+                    enableLUT: document.getElementById('enableLUT').checked,
+                    timecodeSource: document.getElementById('timecodeSource').value,
+                    audioSync: document.getElementById('audioSync').checked,
+                    timecodeFormat: document.getElementById('timecodeFormat').value
+                };
+                
+                const response = await fetch('/api/template/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showStatus('✅ Settings saved successfully! New videos will use these settings.', 'success');
+                } else {
+                    showStatus('❌ ' + (data.message || 'Failed to save settings'), 'error');
+                }
+            } catch (err) {
+                showStatus('❌ Error: ' + err.message, 'error');
+            }
+        });
+        
+        function showStatus(message, type) {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+            if (type === 'loading') {
+                statusDiv.innerHTML = '<span class="spinner"></span>' + message;
+            }
+        }
+        
+        function hideStatus() {
+            statusDiv.className = 'status';
+        }
+    </script>
+</body>
+</html>

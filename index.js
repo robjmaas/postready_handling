@@ -2584,6 +2584,96 @@ app.delete("/lut/:filename", async (req, res) => {
 app.use('/luts', express.static(lutsDir));
 
 /**
+ * Serve template editor and public static files
+ */
+app.use('/public', express.static(path.join(import.meta.url, '..', 'public')));
+
+/**
+ * Template settings storage (in-memory, persists during runtime)
+ */
+let templateSettings = {
+  videoWidth: 1280,
+  videoHeight: 720,
+  videoBitrate: 2000,
+  videoCodec: 'H_264',
+  audioBitrate: 96,
+  audioSampleRate: 48000,
+  audioCodec: 'AAC',
+  audioChannels: 'CODING_MODE_2_0',
+  colorInputSpace: 'REC_709',
+  colorOutputSpace: 'P3DCI',
+  enableLUT: true,
+  timecodeSource: 'ZEROBASED',
+  audioSync: true,
+  timecodeFormat: 'NONDROPFRAME'
+};
+
+/**
+ * GET /api/template/editor - Serve template editor UI
+ */
+app.get("/api/template/editor", (req, res) => {
+  const editorPath = path.join(process.cwd(), "public", "template-editor.html");
+  res.sendFile(editorPath);
+});
+
+/**
+ * GET /api/template/settings - Get current template settings
+ */
+app.get("/api/template/settings", (req, res) => {
+  res.json({
+    success: true,
+    settings: templateSettings
+  });
+});
+
+/**
+ * POST /api/template/settings - Save template settings
+ */
+app.post("/api/template/settings", (req, res) => {
+  try {
+    const {
+      videoWidth, videoHeight, videoBitrate, videoCodec,
+      audioBitrate, audioSampleRate, audioCodec, audioChannels,
+      colorInputSpace, colorOutputSpace, enableLUT,
+      timecodeSource, audioSync, timecodeFormat
+    } = req.body;
+
+    // Validate inputs
+    if (!videoWidth || !videoHeight || !videoBitrate) {
+      return res.status(400).json({ success: false, message: "Missing required video parameters" });
+    }
+
+    // Update settings
+    templateSettings = {
+      videoWidth: parseInt(videoWidth),
+      videoHeight: parseInt(videoHeight),
+      videoBitrate: parseInt(videoBitrate),
+      videoCodec: videoCodec || 'H_264',
+      audioBitrate: parseInt(audioBitrate),
+      audioSampleRate: parseInt(audioSampleRate),
+      audioCodec: audioCodec || 'AAC',
+      audioChannels: audioChannels || 'CODING_MODE_2_0',
+      colorInputSpace: colorInputSpace || 'REC_709',
+      colorOutputSpace: colorOutputSpace || 'P3DCI',
+      enableLUT: enableLUT !== false,
+      timecodeSource: timecodeSource || 'ZEROBASED',
+      audioSync: audioSync !== false,
+      timecodeFormat: timecodeFormat || 'NONDROPFRAME'
+    };
+
+    console.log(`✅ Template settings updated`);
+    console.log(`   Video: ${videoWidth}x${videoHeight} @ ${videoBitrate}kbps (${videoCodec})`);
+    console.log(`   Audio: ${audioCodec} @ ${audioBitrate}kbps, ${audioSampleRate}Hz (${audioChannels})`);
+    console.log(`   Color: ${colorInputSpace} → ${colorOutputSpace}${enableLUT ? ' (with LUT)' : ''}`);
+
+    res.json({ success: true, message: "Settings saved successfully" });
+  } catch (err) {
+    console.error(`Error saving template settings: ${err.message}`);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
  * Webhook endpoint to handle Coconut job callbacks
  */
 app.post("/webhooks/coconut", async (req, res) => {
