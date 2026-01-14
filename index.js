@@ -695,19 +695,25 @@ async function normalizeAudioFile(s3Url, filename) {
       // Download WAV from S3/Filemail
       console.log(`      📥 Downloading WAV file for waveform analysis...`);
       
-      // Convert S3 URL to HTTP URL if needed
-      let fetchUrl = s3Url;
+      let buffer;
       if (s3Url.startsWith('s3://')) {
-        // Convert s3://bucket/key to https://bucket.s3.amazonaws.com/key
-        const parts = s3Url.replace('s3://', '').split('/');
-        const bucket = parts[0];
-        const key = parts.slice(1).join('/');
-        fetchUrl = `https://${bucket}.s3.amazonaws.com/${key}`;
+        // Use AWS SDK for S3 downloads (handles authentication)
+        try {
+          const s3Parts = s3Url.replace('s3://', '').split('/');
+          const bucket = s3Parts[0];
+          const key = s3Parts.slice(1).join('/');
+          const command = new GetObjectCommand({ Bucket: bucket, Key: key });
+          const response = await awsS3Client.send(command);
+          buffer = await response.Body.transformToByteArray();
+        } catch (err) {
+          throw new Error(`S3 download failed: ${err.message}`);
+        }
+      } else {
+        // Use fetch for HTTP URLs (Filemail)
+        const response = await fetch(s3Url);
+        if (!response.ok) throw new Error(`Download failed: ${response.statusCode}`);
+        buffer = await response.buffer();
       }
-      
-      const response = await fetch(fetchUrl);
-      if (!response.ok) throw new Error(`Download failed: ${response.statusCode}`);
-      const buffer = await response.buffer();
       
       // Write to temp file
       await new Promise((resolve, reject) => {
