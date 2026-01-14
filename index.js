@@ -1255,7 +1255,7 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
         // Preserve audio sample rate to maintain sync
         AudioNormalizationSettings: {
           Algorithm: "ITU_BS_1770_3",
-          LoudnessLogging: "LOG_ONLY"
+          LoudnessLogging: "LOG"
         }
       });
       console.log(`🔊 Using external audio: ${audioMappings[0].filename}`);
