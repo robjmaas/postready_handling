@@ -678,99 +678,13 @@ async function stageFileToS3(downloadUrl, filename) {
 async function normalizeAudioFile(s3Url, filename) {
   const ext = filename.toLowerCase().split('.').pop();
   
-  // If already in S3 and is MP3 or AAC, use as-is (compatible with MediaConvert)
-  if (['mp3', 'aac', 'm4a'].includes(ext)) {
-    console.log(`      ✓ ${ext.toUpperCase()} is MediaConvert-compatible`);
+  // If already in compatible format, use as-is
+  if (['mp3', 'aac', 'm4a', 'wav'].includes(ext)) {
+    console.log(`      ✓ ${ext.toUpperCase()} format - MediaConvert compatible`);
     return s3Url;
   }
   
-  // For WAV files: Need to re-encode to AAC to ensure MediaConvert compatibility
-  if (ext === 'wav') {
-    console.log(`      ⚠️  WAV detected - re-encoding to AAC via FFmpeg...`);
-    try {
-      const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      const tempWavPath = `/tmp/${audioId}_input.wav`;
-      const tempAacPath = `/tmp/${audioId}_output.aac`;
-      
-      // Download WAV from S3/Filemail
-      console.log(`      📥 Downloading WAV file for waveform analysis...`);
-      
-      let buffer;
-      if (s3Url.startsWith('s3://')) {
-        // Use AWS SDK for S3 downloads (handles authentication)
-        try {
-          const s3Parts = s3Url.replace('s3://', '').split('/');
-          const bucket = s3Parts[0];
-          const key = s3Parts.slice(1).join('/');
-          const command = new GetObjectCommand({ Bucket: bucket, Key: key });
-          const response = await awsS3Client.send(command);
-          buffer = await response.Body.transformToByteArray();
-        } catch (err) {
-          throw new Error(`S3 download failed: ${err.message}`);
-        }
-      } else {
-        // Use fetch for HTTP URLs (Filemail)
-        const response = await fetch(s3Url);
-        if (!response.ok) throw new Error(`Download failed: ${response.statusCode}`);
-        buffer = await response.buffer();
-      }
-      
-      // Write to temp file
-      await new Promise((resolve, reject) => {
-        fs.writeFile(tempWavPath, buffer, (err) => err ? reject(err) : resolve());
-      });
-      
-      // Log audio file info for timecode sync verification
-      const stats = fs.statSync(tempWavPath);
-      console.log(`      📊 WAV file size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-      
-      // Re-encode WAV to AAC using FFmpeg with waveform/timecode sync
-      console.log(`      🔧 Re-encoding WAV to AAC (preserving waveform for timecode sync)...`);
-      await new Promise((resolve, reject) => {
-        // FFmpeg flags:
-        // -c:a aac = AAC codec
-        // -b:a 96k = 96 kbps bitrate
-        // -ar 48000 = 48kHz sample rate (match video for sync)
-        // -acodec aac = explicit audio codec
-        // -strict -2 = allow experimental codecs if needed
-        // -movflags +faststart = optimize for streaming
-        // Audio waveform is preserved through direct re-encoding (no filtering)
-        execSync(`ffmpeg -i "${tempWavPath}" -c:a aac -b:a 96k -ar 48000 -acodec aac -strict -2 -movflags +faststart "${tempAacPath}" -y 2>&1`, {
-          stdio: 'pipe'
-        });
-        resolve();
-      });
-      
-      // Upload AAC back to S3
-      console.log(`      📤 Uploading re-encoded AAC to S3...`);
-      const aacBuffer = fs.readFileSync(tempAacPath);
-      const s3Key = `audio/${audioId}/output.aac`;
-      
-      await awsS3Client.send(new PutObjectCommand({
-        Bucket: 'postready-staging',
-        Key: s3Key,
-        Body: aacBuffer,
-        ContentType: 'audio/aac'
-      }));
-      
-      const normalizedUrl = `s3://postready-staging/${s3Key}`;
-      const aacStats = fs.statSync(tempAacPath);
-      console.log(`      ✅ AAC ready: ${normalizedUrl}`);
-      console.log(`      🎵 Re-encoded AAC size: ${(aacStats.size / 1024 / 1024).toFixed(2)} MB (waveform synced)`);
-      
-      // Clean up temp files
-      fs.unlinkSync(tempWavPath);
-      fs.unlinkSync(tempAacPath);
-      
-      return normalizedUrl;
-    } catch (err) {
-      console.warn(`      ⚠️  FFmpeg re-encoding failed: ${err.message}`);
-      console.log(`      ⚠️  WARNING: Audio waveform sync may not work properly with original WAV`);
-      return s3Url; // Fallback to original
-    }
-  }
-  
-  // Other formats - return as-is
+  // Other formats - return as-is (fallback)
   console.log(`      ✓ ${ext.toUpperCase()} format accepted`);
   return s3Url;
 }
