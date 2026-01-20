@@ -3509,9 +3509,22 @@ async function pollPendingMediaConvertJobs() {
                 } else {
                   console.warn(`⚠️  Frame.io upload skipped or failed`);
                 }
+                
+                // After video uploads, upload audio files
+                if (job.transfer_id) {
+                  console.log(`🎵 Starting audio upload for transfer: ${job.transfer_id}`);
+                  uploadAudioFilesForTransfer(job.transfer_id)
+                    .catch(err => console.warn(`Audio upload failed: ${err.message}`));
+                }
               })
               .catch((err) => {
                 console.error(`⚠️  Frame.io upload failed: ${err.message}`);
+                
+                // Still try audio upload
+                if (job.transfer_id) {
+                  uploadAudioFilesForTransfer(job.transfer_id)
+                    .catch(err => console.warn(`Audio upload failed: ${err.message}`));
+                }
               });
 
             // Update job status in database
