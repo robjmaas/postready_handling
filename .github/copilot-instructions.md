@@ -68,6 +68,32 @@ POST /sync/wasabi-frameio
 Uploads all completed Coconut jobs (in Wasabi) to Frame.io.
 Useful for re-syncing after Frame.io issues.
 
+#### 6. Upload Audio Files to Frame.io (Separately)
+```bash
+POST /audio/upload
+```
+Upload audio files (WAV, MP3, AAC, etc.) to storage.
+Headers: `x-filename: audiofile.wav`
+Body: binary audio file data
+
+Returns: `{ audioId, filename, s3Url, size }`
+
+Then upload to Frame.io:
+```bash
+POST /audio/{audioId}/upload-to-frameio
+```
+Uploads the audio file as a separate Frame.io asset.
+
+List uploaded audio:
+```bash
+GET /audio/list
+```
+
+Delete audio:
+```bash
+DELETE /audio/{audioId}
+```
+
 ### Database Management
 
 #### View Stats
@@ -267,188 +293,33 @@ To add features:
 
 **AWS Job Templates**
 - Switched from custom S3-stored presets to AWS MediaConvert Job Templates
-- Postready template includes: 1280×720, 2 Mbps QVBR, MP4, AAC 96kbps, timecode burnin, REC_709→DCI-P3 LUT
+- Postready template includes: 1280×720, 2 Mbps QVBR, MP4, AAC 96kbps, REC_709→DCI-P3 LUT
 - Templates managed via `/api/job-templates` endpoints
 - Auto-recreated on deployment to ensure latest settings
 
-### External Audio Sync (Timecode-Based)
+### Audio Upload to Frame.io (Separate Assets)
 
-**Overview:**
-Sync external audio files (interviews, ADR, music) with video using timecode. Audio files can come from:
-1. **Manual upload** - Upload WAV/MP3 files via API
-2. **Filemail transfer** - Auto-detect .wav/.mp3 files in same transfer
+Upload audio files independently and send them to Frame.io as separate assets (no timecode sync):
 
-Both methods use timecode-based synchronization (ZEROBASED) for perfect sync.
-
-**Audio Management Endpoints:**
-
-#### 1. Preview Transfer (Shows Audio Files)
 ```bash
-GET /preview/transfer/{transferId}
-```
-Returns:
-```json
-{
-  "summary": {
-    "totalFiles": 63,
-    "videoFiles": 59,
-    "audioFiles": 2,
-    "otherFiles": 2
-  },
-  "videos": [...],
-  "audio": [
-    {"filename": "interview.wav", "downloadurl": "...", "size": 120000000},
-    {"filename": "adlib.mp3", "downloadurl": "...", "size": 85000000}
-  ],
-  "skipped": [...]
-}
-```
-
-#### 2. Auto-Detect Audio from Transfer
-```bash
-POST /transfer/{transferId}/auto-detect-audio
-```
-Scans transfer for .wav/.mp3/aac/flac/ogg files and auto-maps them.
-Returns:
-```json
-{
-  "success": true,
-  "audioFilesFound": 2,
-  "audioFilesMapped": 2,
-  "mappings": [
-    {"filename": "interview.wav", "audioId": "audio_filemail_..."},
-    {"filename": "adlib.mp3", "audioId": "audio_filemail_..."}
-  ]
-}
-```
-
-#### 3. Upload Audio File (Manual)
-```bash
-POST /audio/upload
-Headers:
-  x-filename: interview_20260112.wav
-  x-duration-ms: 120000 (optional)
-  x-sample-rate: 48000 (optional)
-  x-channels: 2 (optional)
-Binary body: WAV/MP3/AAC audio file
-```
-Returns: `{ audioId, filename, s3_url, ... }`
-
-#### 4. List Available Audio
-```bash
-GET /audio/list
-```
-Shows all uploaded audio files with metadata.
-
-#### 5. Map Audio to Transfer (Manual)
-```bash
-POST /transfer/{transferId}/audio
-Body: {
-  "audioId": "audio_1234567890_abc123",
-  "startOffsetMs": 0
-}
-```
-Links external audio to a transfer. When transfer is processed, this audio replaces the video's original audio.
-
-#### 6. Get Audio Mappings
-```bash
-GET /transfer/{transferId}/audio
-```
-Shows all audio files mapped to a transfer.
-
-#### 7. Remove Audio Mapping
-```bash
-DELETE /transfer/{transferId}/audio/{audioId}
-```
-Unlink audio from transfer (can revert to original audio).
-
-**Processing Flow with Filemail Audio:**
-
-1. **Preview**: `GET /preview/transfer/{id}` → See audio files in transfer
-2. **Auto-map**: `POST /transfer/{id}/auto-detect-audio` → Scan and map all audio
-3. **Process**: `POST /process/transfer/{id}` → Auto-stages Filemail audio to S3
-4. **Output**: MP4 with external audio (timecode synced)
-
-**Processing Flow with Manual Audio Upload:**
-
-1. **Upload audio**: `POST /audio/upload` with WAV/MP3 binary
-2. **Get audio ID** from response
-3. **Map to transfer**: `POST /transfer/{transferId}/audio` with audioId
-4. **Process transfer**: `POST /process/transfer/{transferId}`
-5. **MediaConvert merges**: Video + mapped external audio (timecode synced)
-6. **Output**: MP4 with external audio (original video audio dropped)
-
-**Requirements:**
-- Audio and video must have **same or compatible timecode**
-- Both should use `ZEROBASED` timecode source
-- Audio duration should match or exceed video duration
-- Supported formats: WAV, MP3, AAC, M4A, FLAC, OGG, WMA, ALAC
-
-**Example: Filemail Audio Auto-Sync:**
-```bash
-# 1. Preview transfer (see audio files)
-curl https://postready-handling.fly.dev/preview/transfer/myTransferId
-
-# 2. Auto-detect and map audio
-curl -X POST https://postready-handling.fly.dev/transfer/myTransferId/auto-detect-audio
-
-# 3. Process transfer (audio auto-included)
-curl -X POST https://postready-handling.fly.dev/process/transfer/myTransferId
-
-# 4. Monitor
-curl https://postready-handling.fly.dev/db/jobs/myTransferId
-```
-
-**Example: Manual Audio Upload:**
-```bash
-# 1. Upload interview audio
-curl -X POST http://localhost:3000/audio/upload \
-  -H "x-filename: interview_20260112.wav" \
-  -H "x-sample-rate: 48000" \
-  -H "x-channels: 2" \
+# 1. Upload audio file
+curl -X POST http://127.0.0.1:3000/audio/upload \
+  -H "x-filename: interview.wav" \
   --data-binary @interview.wav
 
-# Get audioId from response (e.g., audio_1234567890_abc123)
+# Get audioId from response (e.g., audio_1234567890_abc)
 
-# 2. Map to transfer
-curl -X POST http://localhost:3000/transfer/eeiayaytchrejoh/audio \
-  -H "Content-Type: application/json" \
-  -d '{"audioId": "audio_1234567890_abc123", "startOffsetMs": 0}'
+# 2. Send audio to Frame.io as separate asset
+curl -X POST http://127.0.0.1:3000/audio/audio_1234567890_abc/upload-to-frameio
 
-# 3. Process transfer (audio auto-included)
-curl -X POST http://localhost:3000/process/transfer/eeiayaytchrejoh
+# 3. List uploaded audio files
+curl http://127.0.0.1:3000/audio/list
 
-# 4. Monitor (check logs or database)
-curl http://localhost:3000/db/jobs/eeiayaytchrejoh
+# 4. Delete audio file
+curl -X DELETE http://127.0.0.1:3000/audio/audio_1234567890_abc
 ```
 
-**Database Schema:**
-
-```sql
-audio_files:
-  id TEXT PRIMARY KEY
-  filename TEXT UNIQUE
-  s3_url TEXT (S3 URL or Filemail HTTP URL)
-  duration_ms INTEGER
-  sample_rate INTEGER
-  channels INTEGER
-  created_at DATETIME
-
-transfer_audio_mapping:
-  id TEXT PRIMARY KEY
-  transfer_id TEXT (FK)
-  audio_id TEXT (FK)
-  sync_mode TEXT ('timecode')
-  start_offset_ms INTEGER
-  created_at DATETIME
-```
-
-**How It Works:**
-- Filemail URLs are stored as-is in `audio_files.s3_url`
-- During processing, Filemail URLs are auto-staged to S3
-- MediaConvert receives S3 URL for both video and audio
-- Both use ZEROBASED timecode source for frame-accurate sync
-- Output includes external audio instead of video's original audio
+Audio files are stored in S3 and can be sent to Frame.io individually. Each audio file appears as a separate asset in the Frame.io project.
 
 ### When to Ask for Help
 
@@ -457,4 +328,3 @@ transfer_audio_mapping:
 - Frame.io project configuration
 - Wasabi bucket credentials or region
 - Adding new external integrations
-- Audio sync issues or timecode mismatches
