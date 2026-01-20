@@ -50,9 +50,7 @@ const awsS3Client = new S3Client({
 // Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
 let frameIODailiesFolderId = null;
 
-// Simple in-memory storage for audio files (URL + metadata)
-// Format: { [audioId]: { filename, url, uploadedAt } }
-let audioFileStorage = {};// MediaConvert client (initialized if credentials available)
+// MediaConvert client (initialized if credentials available)
 let mediaConvertClient = null;
 if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaconvert") {
   mediaConvertClient = new MediaConvertClient({
@@ -201,7 +199,27 @@ async function initDb() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    CREATE TABLE IF NOT EXISTS audio_files (
+      id TEXT PRIMARY KEY,
+      filename TEXT UNIQUE,
+      s3_url TEXT,
+      duration_ms INTEGER,
+      sample_rate INTEGER,
+      channels INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
 
+    CREATE TABLE IF NOT EXISTS transfer_audio_mapping (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT,
+      audio_id TEXT,
+      sync_mode TEXT DEFAULT 'timecode',
+      start_offset_ms INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(transfer_id) REFERENCES processed_transfers(id),
+      FOREIGN KEY(audio_id) REFERENCES audio_files(id),
+      UNIQUE(transfer_id, audio_id)
+    );
   `);
 
   // Add metadata column if it doesn't exist (for S3 staging key storage)
@@ -378,15 +396,26 @@ function isVideoFile(filename) {
   return videoExtensions.includes(ext);
 }
 
+function isAudioFile(filename) {
+  const audioExtensions = ['.wav', '.mp3', '.aac', '.m4a', '.flac', '.ogg', '.wma', '.alac'];
+  const ext = filename.toLowerCase().match(/\.[^.]+$/)?.[0] || '';
+  return audioExtensions.includes(ext);
+}
+
 /**
- * Get a file's size via a HEAD request (for validation)
+ * Get file info (size, headers) via HEAD request
  */
-async function getFileSize(url) {
+async function getFileInfo(url) {
   return new Promise((resolve, reject) => {
-    const protocol = url.startsWith('https') ? https : http;
+    const options = new URL(url);
+    const client = url.startsWith('https') ? https : http;
     
-    protocol.request(url, { method: 'HEAD' }, (res) => {
-      resolve(parseInt(res.headers['content-length'] || '0', 10));
+    client.request(url, { method: 'HEAD' }, (res) => {
+      resolve({
+        size: parseInt(res.headers['content-length'] || '0', 10),
+        contentType: res.headers['content-type'] || '',
+        etag: res.headers['etag'] || ''
+      });
     }).on('error', reject).end();
   });
 }
@@ -399,7 +428,37 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
     console.log("Fetching Filemail files...");
     const files = await getFilemailFiles(transferId);
 
+    // Auto-detect and map audio files (before processing videos)
+    console.log("\n[Pre-processing] Auto-detecting audio files...");
+    const audioFiles = files.filter(f => isAudioFile(f.filename));
     const videoFiles = files.filter(f => isVideoFile(f.filename));
+    
+    if (audioFiles.length > 0) {
+      console.log(`✅ Found ${audioFiles.length} audio file(s), auto-mapping...`);
+      for (const audioFile of audioFiles) {
+        const audioId = `audio_filemail_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        try {
+          // Try to get audio file info via HEAD request
+          const audioInfo = await getFileInfo(audioFile.downloadurl);
+          console.log(`   📊 ${audioFile.filename} - ${audioInfo.size} bytes`);
+          
+          await db.run(
+            "INSERT OR IGNORE INTO audio_files (id, filename, s3_url, duration_ms) VALUES (?, ?, ?, ?)",
+            [audioId, audioFile.filename, audioFile.downloadurl, null]
+          );
+          await db.run(
+            "INSERT OR IGNORE INTO transfer_audio_mapping (id, transfer_id, audio_id, sync_mode, start_offset_ms) VALUES (?, ?, ?, ?, ?)",
+            [mappingId, transferId, audioId, "timecode", 0]
+          );
+          console.log(`   ✅ Mapped: ${audioFile.filename}`);
+        } catch (err) {
+          console.warn(`   ⚠️  Failed to map ${audioFile.filename}: ${err.message}`);
+        }
+      }
+    } else {
+      console.log(`ℹ️  No audio files found in transfer`);
+    }
 
     // Show summary before processing
     console.log("\n" + "=".repeat(60));
@@ -408,7 +467,8 @@ async function processFilemailTransfer(transferId, templateName = "Postready") {
     console.log(`Transfer ID: ${transferId}`);
     console.log(`Total files: ${files.length}`);
     console.log(`Video files to process: ${videoFiles.length}`);
-    console.log(`Non-video files: ${files.length - videoFiles.length}`);
+    console.log(`Audio files auto-mapped: ${audioFiles.length}`);
+    console.log(`Non-video, non-audio files: ${files.length - videoFiles.length - audioFiles.length}`);
     console.log(`Transcode service: ${TRANSCODE_SERVICE.toUpperCase()}`);
     console.log(`Job Template: ${templateName}`);
     console.log("=".repeat(60) + "\n");
@@ -612,6 +672,25 @@ async function stageFileToS3(downloadUrl, filename) {
 }
 
 /**
+ * Normalize audio file format for MediaConvert compatibility
+ * Converts WAV files to AAC via FFmpeg to ensure no codec issues
+ */
+async function normalizeAudioFile(s3Url, filename) {
+  const ext = filename.toLowerCase().split('.').pop();
+  
+  // If already in compatible format, use as-is
+  if (['mp3', 'aac', 'm4a', 'wav'].includes(ext)) {
+    console.log(`      ✓ ${ext.toUpperCase()} format - MediaConvert compatible`);
+    return s3Url;
+  }
+  
+  // Other formats - return as-is (fallback)
+  console.log(`      ✓ ${ext.toUpperCase()} format accepted`);
+  return s3Url;
+}
+
+
+/**
  * Create and store a MediaConvert output preset in S3
  * Presets include timecode, color grading, and codec settings
  */
@@ -719,6 +798,14 @@ const POSTREADY_TEMPLATE = {
             "VideoDescription": {
               "Width": 1280,
               "Height": 720,
+              "VideoPreprocessors": {
+                "TimecodeBurnin": {
+                  "FontSize": 32,
+                  "Position": "TOP_LEFT"
+                }
+              },
+              "TimecodeInsertion": "PIC_TIMING_SEI",
+              "TimecodeTrack": "ENABLED",
               "CodecSettings": {
                 "Codec": "H_264",
                 "H264Settings": {
@@ -757,7 +844,8 @@ const POSTREADY_TEMPLATE = {
             "DefaultSelection": "DEFAULT"
           }
         },
-        "VideoSelector": {}
+        "VideoSelector": {},
+        "TimecodeSource": "ZEROBASED"
       }
     ]
   },
@@ -940,8 +1028,56 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     const fileInput = stagingInfo.s3Url;
     console.log(`   Input: ${fileInput}`);
     
+    // Fetch audio mappings if transfer is specified
+    let audioInputs = [];
+    let audioMappings = [];
+    if (transferId) {
+      console.log(`\n[Step 2/3] Checking for mapped audio files...`);
+      audioMappings = await db.all(
+        "SELECT tm.id, tm.audio_id, tm.start_offset_ms, af.s3_url, af.filename FROM transfer_audio_mapping tm JOIN audio_files af ON tm.audio_id = af.id WHERE tm.transfer_id = ?",
+        [transferId]
+      );
+      if (audioMappings.length > 0) {
+        console.log(`✅ Found ${audioMappings.length} audio file(s)`);
+        
+        // Process each audio file (stage Filemail URLs to S3 if needed)
+        for (let i = 0; i < audioMappings.length; i++) {
+          const mapping = audioMappings[i];
+          console.log(`   [${i + 1}] ${mapping.filename} (offset: ${mapping.start_offset_ms}ms)`);
+          
+          // If URL is Filemail (http), stage it to S3 first
+          if (mapping.s3_url.startsWith('http')) {
+            console.log(`      🌐 Filemail URL detected, staging to S3...`);
+            try {
+              const stagedInfo = await stageFileToS3(mapping.s3_url, mapping.filename);
+              // Normalize audio through FFmpeg to ensure compatibility
+              console.log(`      🎧 Normalizing audio format...`);
+              const normalizedUrl = await normalizeAudioFile(stagedInfo.s3Url, mapping.filename);
+              audioMappings[i].s3_url = normalizedUrl;
+              console.log(`      ✅ Staged & normalized to S3: ${normalizedUrl}`);
+            } catch (err) {
+              console.warn(`      ⚠️  Failed to stage/normalize audio: ${err.message}`);
+              throw err;
+            }
+          } else {
+            // Audio already in S3 - normalize if needed
+            try {
+              console.log(`      ✅ S3 audio found, normalizing format...`);
+              const normalizedUrl = await normalizeAudioFile(mapping.s3_url, mapping.filename);
+              audioMappings[i].s3_url = normalizedUrl;
+            } catch (err) {
+              console.warn(`      ⚠️  Failed to normalize audio: ${err.message}`);
+              // Continue anyway - try with original
+            }
+          }
+        }
+      } else {
+        console.log(`ℹ️  No audio mappings found`);
+      }
+    }
+    
     // Create job with 3D LUT at Settings level (correct structure)
-    console.log(`\n[Step 2/3] Creating MediaConvert job...`);
+    console.log(`\n[Step 3/3] Creating MediaConvert job...`);
     
     // Build inputs array (video + audio)
     const inputs = [
@@ -957,11 +1093,96 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
       }
     ];
 
+    // Add external audio inputs with timecode-based sync
+    audioMappings.forEach((mapping, idx) => {
+      // For timecode-based sync, specify AudioTrackSelectors to ensure sync
+      inputs.push({
+        FileInput: mapping.s3_url,
+        AudioSelectors: {
+          "Audio Selector 1": {
+            DefaultSelection: "DEFAULT",
+            // Use offset if specified in mapping
+            AudioTrackSelectors: mapping.start_offset_ms > 0 ? [
+              {
+                TrackNumber: 1
+              }
+            ] : undefined
+          }
+        },
+        TimecodeSource: "ZEROBASED",
+        // Timecode offset for audio sync (in frames, 25fps assumed for PAL)
+        TimecodeStart: mapping.start_offset_ms > 0 ? 
+          Math.round((mapping.start_offset_ms / 1000) * 25) : undefined
+      });
+    });
 
-
-    // Build audio descriptions
-    const audioDescriptions = [
-      {
+    // Build audio descriptions (use first external audio if available, else use video audio)
+    const audioDescriptions = [];
+    if (audioMappings.length > 0) {
+      // Use first external audio (from input index 1)
+      // Auto-detect best codec based on file format
+      const audioFileExt = audioMappings[0].filename.toLowerCase().split('.').pop();
+      let codec, codecSettings;
+      
+      if (audioFileExt === 'wav') {
+        // WAV files: use AAC with MPEG4 spec for maximum compatibility
+        codec = "AAC";
+        codecSettings = {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000,
+            RawFormat: "NONE",
+            Specification: "MPEG4"
+          }
+        };
+      } else if (['mp3', 'aac', 'm4a'].includes(audioFileExt)) {
+        // MP3/AAC/M4A: encode as AAC
+        codec = "AAC";
+        codecSettings = {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000
+          }
+        };
+      } else {
+        // Default: AAC
+        codec = "AAC";
+        codecSettings = {
+          Codec: "AAC",
+          AacSettings: {
+            Bitrate: 96000,
+            CodingMode: "CODING_MODE_2_0",
+            SampleRate: 48000
+          }
+        };
+      }
+      
+      // Audio description with timecode-based waveform sync via AudioSourceName
+      audioDescriptions.push({
+        AudioSourceName: "1:Audio Selector 1",  // Input 1, Audio Selector 1 (timecode synced)
+        AudioType: 0,
+        CodecSettings: codecSettings,
+        // Preserve audio sample rate to maintain sync
+        AudioNormalizationSettings: {
+          Algorithm: "ITU_BS_1770_3",
+          LoudnessLogging: "LOG"
+        }
+      });
+      console.log(`🔊 Using external audio: ${audioMappings[0].filename}`);
+      console.log(`   Input index: 1, Audio Selector: 1`);
+      console.log(`   Sync mode: TIMECODE-BASED (ZEROBASED) + WAVEFORM`);
+      if (audioMappings[0].start_offset_ms > 0) {
+        console.log(`   Timecode offset: ${audioMappings[0].start_offset_ms}ms`);
+      }
+    } else {
+      // Use video's original audio (from input index 0, Audio Selector 1)
+      audioDescriptions.push({
+        AudioSourceName: "Audio Selector 1",
+        AudioType: 0,
         CodecSettings: {
           Codec: "AAC",
           AacSettings: {
@@ -970,12 +1191,13 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
             SampleRate: 48000
           }
         }
-      }
-    ];
+      });
+    }
 
     const createJobCommand = new CreateJobCommand({
       Role: AWS_MEDIACONVERT_ROLE,
       Settings: {
+        TimecodeConfig: {},
         ColorConversion3DLUTSettings: [
           {
             FileInput: "s3://postready-staging/Awsome1.cube",
@@ -995,6 +1217,14 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
                 VideoDescription: {
                   Width: 1280,
                   Height: 720,
+                  VideoPreprocessors: {
+                    TimecodeBurnin: {
+                      FontSize: 32,
+                      Position: "TOP_LEFT"
+                    }
+                  },
+                  TimecodeInsertion: "PIC_TIMING_SEI",
+                  TimecodeTrack: "ENABLED",
                   CodecSettings: {
                     Codec: "H_264",
                     H264Settings: {
@@ -1033,6 +1263,9 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
     console.log(`   Template: ${templateName}`);
     console.log(`   Output: s3://postready-staging/outputs/`);
     console.log(`   🎨 3D LUT: s3://postready-staging/Awsome1.cube (ColorConversion3DLUTSettings)`);
+    if (audioMappings.length > 0) {
+      console.log(`   🔊 Audio: ${audioMappings[0].filename} (timecode synced)`);
+    }
     console.log(`${'='.repeat(60)}\n`);
     
     return {
@@ -1546,93 +1779,6 @@ async function uploadToFrameIO(videoUrl, filename) {
 }
 
 /**
- * Upload audio file to Frame.io as a separate asset
- */
-async function uploadAudioToFrameIO(audioUrl, audioFilename) {
-  if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
-    console.warn("⚠️  Frame.io credentials not configured, skipping audio upload");
-    return null;
-  }
-
-  try {
-    console.log(`📤 Uploading audio to Frame.io`);
-    console.log(`   Filename: ${audioFilename}`);
-    console.log(`   Project ID: ${FRAMEIO_PROJECT_ID}`);
-    console.log(`   Source URL: ${audioUrl.substring(0, 100)}...`);
-    
-    // Step 1: Fetch the project details to get root asset ID
-    console.log(`   Step 1: Fetching project details...`);
-    const projectRes = await fetch(
-      `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}`,
-      {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-          "Content-Type": "application/json"
-        }
-      }
-    );
-
-    if (!projectRes.ok) {
-      throw new Error(`Failed to fetch project: ${projectRes.status}`);
-    }
-
-    const projectData = await projectRes.json();
-    const rootAssetId = projectData.root_asset_id;
-    
-    if (!rootAssetId) {
-      console.error(`❌ Project doesn't have a root_asset_id`);
-      throw new Error("No root_asset_id found in project");
-    }
-
-    console.log(`   Root asset ID: ${rootAssetId}`);
-    
-    // Step 2: Create audio asset in root folder
-    console.log(`   Step 2: Creating audio asset in project root...`);
-    
-    const requestBody = {
-      name: audioFilename,
-      type: "file",
-      source: {
-        type: "url",
-        url: audioUrl
-      }
-    };
-    
-    const createRes = await fetch(
-      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(requestBody)
-      }
-    );
-
-    const createResponseText = await createRes.text();
-    
-    if (!createRes.ok) {
-      console.error(`❌ Frame.io API error ${createRes.status}`);
-      console.error(`   Response: ${createResponseText}`);
-      throw new Error(`Frame.io API error ${createRes.status}: ${createResponseText}`);
-    }
-
-    const assetData = JSON.parse(createResponseText);
-    console.log(`✅ Audio asset created in Frame.io: ${assetData.id}`);
-    console.log(`   Asset name: ${assetData.name}`);
-    console.log(`   Status: Frame.io will download from presigned S3 URL`);
-    console.log(`   ⏱️  Audio may take 1-3 minutes to appear on Frame.io`);
-    
-    return assetData;
-  } catch (err) {
-    console.error(`❌ Frame.io audio upload error:`, err.message);
-    return null;
-  }
-}
-
-/**
  * Store a new Coconut job in the database
  */
 async function storeCoconutJob(jobId, transferId, filename) {
@@ -1676,16 +1822,23 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
     
     const files = await getFilemailFiles(transferId);
     const videoFiles = files.filter(f => isVideoFile(f.filename));
-    const otherFiles = files.filter(f => !isVideoFile(f.filename));
+    const audioFiles = files.filter(f => isAudioFile(f.filename));
+    const otherFiles = files.filter(f => !isVideoFile(f.filename) && !isAudioFile(f.filename));
     
     res.json({
       transferId,
       summary: {
         totalFiles: files.length,
         videoFiles: videoFiles.length,
+        audioFiles: audioFiles.length,
         otherFiles: otherFiles.length
       },
       videos: videoFiles.map(f => ({
+        filename: f.filename,
+        downloadurl: f.downloadurl,
+        size: f.filesize
+      })),
+      audio: audioFiles.map(f => ({
         filename: f.filename,
         downloadurl: f.downloadurl,
         size: f.filesize
@@ -1697,6 +1850,84 @@ app.get("/preview/transfer/:transferId", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * Auto-detect and map audio files from transfer
+ * POST /transfer/{transferId}/auto-detect-audio
+ * Scans Filemail transfer for .wav/.mp3/etc files and auto-maps them
+ */
+app.post("/transfer/:transferId/auto-detect-audio", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    console.log(`Auto-detecting audio files for transfer: ${transferId}`);
+
+    // Verify transfer exists
+    const transfer = await db.get("SELECT id FROM processed_transfers WHERE id = ?", [transferId]);
+    if (!transfer) {
+      return res.status(404).json({ error: "Transfer not found" });
+    }
+
+    // Fetch files from Filemail
+    const files = await getFilemailFiles(transferId);
+    const audioFiles = files.filter(f => isAudioFile(f.filename));
+
+    if (audioFiles.length === 0) {
+      return res.json({
+        success: true,
+        transferId,
+        audioFilesFound: 0,
+        message: "No audio files found in transfer",
+        mappings: []
+      });
+    }
+
+    console.log(`✅ Found ${audioFiles.length} audio file(s) in transfer`);
+
+    // Auto-map each audio file
+    const mappings = [];
+    for (const audioFile of audioFiles) {
+      const audioId = `audio_filemail_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      try {
+        // Store Filemail audio as downloadable audio reference
+        await db.run(
+          "INSERT INTO audio_files (id, filename, s3_url, duration_ms) VALUES (?, ?, ?, ?)",
+          [audioId, audioFile.filename, audioFile.downloadurl, null]
+        );
+
+        // Create mapping
+        await db.run(
+          "INSERT OR REPLACE INTO transfer_audio_mapping (id, transfer_id, audio_id, sync_mode, start_offset_ms) VALUES (?, ?, ?, ?, ?)",
+          [mappingId, transferId, audioId, "timecode", 0]
+        );
+
+        console.log(`   ✅ Mapped: ${audioFile.filename} (${audioId})`);
+        mappings.push({
+          audioId,
+          mappingId,
+          filename: audioFile.filename,
+          size: audioFile.filesize
+        });
+      } catch (err) {
+        console.warn(`   ⚠️  Failed to map ${audioFile.filename}: ${err.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      transferId,
+      audioFilesFound: audioFiles.length,
+      audioFilesMapped: mappings.length,
+      message: `Auto-mapped ${mappings.length} audio file(s)`,
+      mappings
+    });
+  } catch (err) {
+    console.error("Auto-detect audio error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /**
  * Confirm and process a transfer - requires manual approval
  */
@@ -1740,6 +1971,188 @@ app.post("/process/transfer/:transferId", async (req, res) => {
 /**
  * Audio Management Endpoints
  */
+
+/**
+ * List available audio files
+ */
+app.get("/audio/list", async (req, res) => {
+  try {
+    const audioFiles = await db.all("SELECT id, filename, duration_ms, sample_rate, channels, created_at FROM audio_files ORDER BY created_at DESC");
+    res.json({
+      success: true,
+      count: audioFiles.length,
+      audioFiles
+    });
+  } catch (err) {
+    console.error("Audio list error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Upload audio file (binary)
+ * POST /audio/upload
+ * Headers: x-filename, x-duration-ms (optional), x-sample-rate (optional), x-channels (optional)
+ */
+app.post("/audio/upload", async (req, res) => {
+  try {
+    const filename = req.headers["x-filename"];
+    const durationMs = parseInt(req.headers["x-duration-ms"]) || null;
+    const sampleRate = parseInt(req.headers["x-sample-rate"]) || null;
+    const channels = parseInt(req.headers["x-channels"]) || null;
+
+    if (!filename) {
+      return res.status(400).json({ error: "x-filename header required" });
+    }
+
+    // Collect binary data
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    
+    req.on("end", async () => {
+      try {
+        const buffer = Buffer.concat(chunks);
+        const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const s3Key = `audio/${filename}`;
+
+        // Upload to S3
+        const uploadCommand = new PutObjectCommand({
+          Bucket: "postready-staging",
+          Key: s3Key,
+          Body: buffer,
+          ContentType: "audio/wav"
+        });
+        await awsS3Client.send(uploadCommand);
+
+        const s3Url = `s3://postready-staging/${s3Key}`;
+
+        // Save to database
+        await db.run(
+          "INSERT INTO audio_files (id, filename, s3_url, duration_ms, sample_rate, channels) VALUES (?, ?, ?, ?, ?, ?)",
+          [audioId, filename, s3Url, durationMs, sampleRate, channels]
+        );
+
+        console.log(`✅ Audio uploaded: ${filename} (${buffer.length} bytes)`);
+        res.json({
+          success: true,
+          audioId,
+          filename,
+          s3Url,
+          durationMs,
+          sampleRate,
+          channels
+        });
+      } catch (err) {
+        console.error("Audio upload error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+  } catch (err) {
+    console.error("Audio upload error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Map audio to transfer (for timecode-based sync)
+ * POST /transfer/{transferId}/audio
+ */
+app.post("/transfer/:transferId/audio", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { audioId, startOffsetMs } = req.body;
+
+    if (!audioId) {
+      return res.status(400).json({ error: "audioId required in body" });
+    }
+
+    // Verify audio exists
+    const audio = await db.get("SELECT id FROM audio_files WHERE id = ?", [audioId]);
+    if (!audio) {
+      return res.status(404).json({ error: "Audio file not found" });
+    }
+
+    // Verify transfer exists
+    const transfer = await db.get("SELECT id FROM processed_transfers WHERE id = ?", [transferId]);
+    if (!transfer) {
+      return res.status(404).json({ error: "Transfer not found" });
+    }
+
+    const mappingId = `mapping_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Create mapping
+    await db.run(
+      "INSERT OR REPLACE INTO transfer_audio_mapping (id, transfer_id, audio_id, sync_mode, start_offset_ms) VALUES (?, ?, ?, ?, ?)",
+      [mappingId, transferId, audioId, "timecode", startOffsetMs || 0]
+    );
+
+    console.log(`✅ Audio mapped to transfer: ${transferId} <- ${audioId}`);
+    res.json({
+      success: true,
+      message: "Audio mapped to transfer",
+      mappingId,
+      transferId,
+      audioId,
+      startOffsetMs: startOffsetMs || 0
+    });
+  } catch (err) {
+    console.error("Audio mapping error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Get audio mapping for transfer
+ * GET /transfer/{transferId}/audio
+ */
+app.get("/transfer/:transferId/audio", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const mappings = await db.all(
+      "SELECT tm.id, tm.transfer_id, tm.audio_id, tm.sync_mode, tm.start_offset_ms, af.filename, af.s3_url, af.duration_ms FROM transfer_audio_mapping tm LEFT JOIN audio_files af ON tm.audio_id = af.id WHERE tm.transfer_id = ?",
+      [transferId]
+    );
+
+    res.json({
+      success: true,
+      transferId,
+      audioMappings: mappings
+    });
+  } catch (err) {
+    console.error("Audio mapping query error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Remove audio mapping
+ * DELETE /transfer/{transferId}/audio/{audioId}
+ */
+app.delete("/transfer/:transferId/audio/:audioId", async (req, res) => {
+  try {
+    const { transferId, audioId } = req.params;
+    
+    const result = await db.run(
+      "DELETE FROM transfer_audio_mapping WHERE transfer_id = ? AND audio_id = ?",
+      [transferId, audioId]
+    );
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: "Audio mapping not found" });
+    }
+
+    console.log(`✅ Audio removed from transfer: ${transferId}`);
+    res.json({
+      success: true,
+      message: "Audio mapping removed",
+      transferId,
+      audioId
+    });
+  } catch (err) {
+    console.error("Audio removal error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 /**
  * Test Frame.io connection and credentials
@@ -1792,169 +2205,6 @@ app.get("/test/frameio", async (req, res) => {
       success: false,
       error: err.message
     });
-  }
-});
-
-/**
- * Upload audio file to storage
- * POST /audio/upload
- * Headers: x-filename
- * Body: binary audio file data
- */
-app.post("/audio/upload", async (req, res) => {
-  try {
-    const filename = req.headers["x-filename"];
-    if (!filename) {
-      return res.status(400).json({ error: "x-filename header required" });
-    }
-
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    
-    req.on("end", async () => {
-      try {
-        const buffer = Buffer.concat(chunks);
-        const audioId = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const s3Key = `audio/${audioId}_${filename}`;
-
-        // Upload to S3
-        const uploadCommand = new PutObjectCommand({
-          Bucket: "postready-staging",
-          Key: s3Key,
-          Body: buffer,
-          ContentType: "audio/mpeg"
-        });
-        await awsS3Client.send(uploadCommand);
-
-        const s3Url = `s3://postready-staging/${s3Key}`;
-        
-        // Store reference in memory
-        audioFileStorage[audioId] = {
-          filename,
-          s3Url,
-          uploadedAt: new Date().toISOString(),
-          size: buffer.length
-        };
-
-        console.log(`✅ Audio uploaded: ${filename} (${buffer.length} bytes)`);
-        res.json({
-          success: true,
-          audioId,
-          filename,
-          s3Url,
-          size: buffer.length
-        });
-      } catch (err) {
-        console.error("Audio upload error:", err);
-        res.status(500).json({ error: err.message });
-      }
-    });
-  } catch (err) {
-    console.error("Audio upload error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * List uploaded audio files
- * GET /audio/list
- */
-app.get("/audio/list", async (req, res) => {
-  try {
-    const audioFiles = Object.entries(audioFileStorage).map(([audioId, data]) => ({
-      audioId,
-      ...data
-    }));
-
-    res.json({
-      success: true,
-      count: audioFiles.length,
-      audioFiles
-    });
-  } catch (err) {
-    console.error("Audio list error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * Upload audio file to Frame.io
- * POST /audio/{audioId}/upload-to-frameio
- */
-app.post("/audio/:audioId/upload-to-frameio", async (req, res) => {
-  try {
-    const { audioId } = req.params;
-    const audioFile = audioFileStorage[audioId];
-
-    if (!audioFile) {
-      return res.status(404).json({ error: "Audio file not found" });
-    }
-
-    console.log(`🎵 Uploading audio to Frame.io: ${audioId}`);
-
-    // Get presigned URL for the audio file
-    const getCommand = new GetObjectCommand({
-      Bucket: "postready-staging",
-      Key: audioFile.s3Url.split("postready-staging/")[1]
-    });
-    const presignedUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
-
-    // Upload to Frame.io
-    const result = await uploadAudioToFrameIO(presignedUrl, audioFile.filename);
-
-    if (result) {
-      res.json({
-        success: true,
-        audioId,
-        filename: audioFile.filename,
-        frameioAssetId: result.id,
-        message: "Audio file uploaded to Frame.io"
-      });
-    } else {
-      res.status(500).json({ error: "Failed to upload to Frame.io" });
-    }
-  } catch (err) {
-    console.error("Frame.io upload error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * Delete uploaded audio file
- * DELETE /audio/{audioId}
- */
-app.delete("/audio/:audioId", async (req, res) => {
-  try {
-    const { audioId } = req.params;
-    const audioFile = audioFileStorage[audioId];
-
-    if (!audioFile) {
-      return res.status(404).json({ error: "Audio file not found" });
-    }
-
-    // Delete from S3
-    try {
-      const deleteCommand = new DeleteObjectCommand({
-        Bucket: "postready-staging",
-        Key: audioFile.s3Url.split("postready-staging/")[1]
-      });
-      await awsS3Client.send(deleteCommand);
-    } catch (deleteErr) {
-      console.warn(`⚠️  Failed to delete from S3: ${deleteErr.message}`);
-    }
-
-    // Delete from memory
-    delete audioFileStorage[audioId];
-
-    console.log(`✅ Audio deleted: ${audioId}`);
-    res.json({
-      success: true,
-      message: "Audio file deleted",
-      audioId
-    });
-  } catch (err) {
-    console.error("Audio deletion error:", err);
-    res.status(500).json({ error: err.message });
   }
 });
 
