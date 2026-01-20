@@ -53,6 +53,10 @@ let frameIODailiesFolderId = null;
 // Map to track in-progress transfer folder creation to prevent race conditions
 const transferFolderCreationMap = new Map();
 
+// Cache of created transfer folder IDs (transferId -> folderId)
+// Prevents duplicate folder creation when API doesn't immediately return new folders
+const transferFolderCache = new Map();
+
 // MediaConvert client (initialized if credentials available)
 let mediaConvertClient = null;
 if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaconvert") {
@@ -1696,11 +1700,19 @@ async function uploadToWasabi(localFilePath, s3Key) {
 /**
  * Ensure a transfer folder exists on Frame.io, creating it if necessary
  * Uses a lock to prevent duplicate folder creation from concurrent requests
+ * Uses cache to prevent duplicate folders when API doesn't immediately return new items
  * Returns the folder asset ID or root asset ID if folder operations fail
  */
 async function ensureTransferFolder(rootAssetId, transferId) {
   if (!transferId) {
     return rootAssetId;
+  }
+
+  // Check cache first - if we recently created this folder, use it
+  if (transferFolderCache.has(transferId)) {
+    const cachedFolderId = transferFolderCache.get(transferId);
+    console.log(`   ✅ Using cached transfer folder: ${cachedFolderId}`);
+    return cachedFolderId;
   }
 
   // If folder creation is already in progress, wait for it
@@ -1741,6 +1753,8 @@ async function ensureTransferFolder(rootAssetId, transferId) {
       
       if (transferFolder) {
         console.log(`   ✅ Using existing transfer folder: ${transferFolder.id}`);
+        // Cache it for future requests
+        transferFolderCache.set(transferId, transferFolder.id);
         resolveFolder(transferFolder.id);
         return transferFolder.id;
       } else {
@@ -1770,7 +1784,16 @@ async function ensureTransferFolder(rootAssetId, transferId) {
     if (createFolderRes.ok) {
       const folderData = await createFolderRes.json();
       console.log(`   ✅ Created transfer folder: ${folderData.id}`);
+      
+      // Cache it immediately to prevent duplicate creation from concurrent requests
+      transferFolderCache.set(transferId, folderData.id);
       resolveFolder(folderData.id);
+      
+      // Keep cache for 5 minutes in case concurrent uploads are still happening
+      setTimeout(() => {
+        transferFolderCache.delete(transferId);
+      }, 300000);
+      
       return folderData.id;
     } else {
       const errorText = await createFolderRes.text();
