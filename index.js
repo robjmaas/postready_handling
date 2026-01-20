@@ -1691,6 +1691,71 @@ async function uploadToWasabi(localFilePath, s3Key) {
 /* ==================== COCONUT WEBHOOK ==================== */
 
 /**
+ * Ensure a transfer folder exists on Frame.io, creating it if necessary
+ * Returns the folder asset ID or root asset ID if folder operations fail
+ */
+async function ensureTransferFolder(rootAssetId, transferId) {
+  if (!transferId) {
+    return rootAssetId;
+  }
+
+  try {
+    // Get children of root to find folder with transfer ID name
+    const childrenRes = await fetch(
+      `https://api.frame.io/v2/assets/${rootAssetId}/children?filter_type=folder`,
+      {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    if (childrenRes.ok) {
+      const childrenData = await childrenRes.json();
+      const folders = childrenData.children || [];
+      const transferFolder = folders.find(f => f.name === transferId);
+      
+      if (transferFolder) {
+        console.log(`   ✅ Using existing transfer folder: ${transferFolder.id}`);
+        return transferFolder.id;
+      }
+    }
+
+    // Folder doesn't exist, create it
+    console.log(`   📁 Creating new transfer folder: ${transferId}...`);
+    const createFolderRes = await fetch(
+      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          name: transferId,
+          type: "folder"
+        })
+      }
+    );
+
+    if (createFolderRes.ok) {
+      const folderData = await createFolderRes.json();
+      console.log(`   ✅ Created transfer folder: ${folderData.id}`);
+      return folderData.id;
+    } else {
+      const errorText = await createFolderRes.text();
+      console.warn(`   ⚠️  Failed to create folder: ${createFolderRes.status} - ${errorText}`);
+      return rootAssetId;
+    }
+  } catch (err) {
+    console.warn(`   ⚠️  Could not ensure transfer folder: ${err.message}`);
+    return rootAssetId;
+  }
+}
+
+/**
  * Upload a video to Frame.io
  */
 async function uploadToFrameIO(videoUrl, filename, transferId = null) {
@@ -1733,69 +1798,11 @@ async function uploadToFrameIO(videoUrl, filename, transferId = null) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 1.5: If transfer ID provided, find or create a folder with that name
+    // Step 1.5: If transfer ID provided, ensure folder exists (creates if needed)
     let parentAssetId = rootAssetId;
     if (transferId) {
-      console.log(`   Step 1.5: Looking for transfer folder: ${transferId}...`);
-      try {
-        // Get children of root to find folder with transfer ID name
-        const childrenRes = await fetch(
-          `https://api.frame.io/v2/assets/${rootAssetId}/children?filter_type=folder`,
-          {
-            method: "GET",
-            headers: {
-              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-              "Content-Type": "application/json"
-            }
-          }
-        );
-
-        if (childrenRes.ok) {
-          const childrenData = await childrenRes.json();
-          const folders = childrenData.children || [];
-          const transferFolder = folders.find(f => f.name === transferId);
-          
-          if (transferFolder) {
-            console.log(`   ✅ Found existing transfer folder: ${transferFolder.id}`);
-            parentAssetId = transferFolder.id;
-          } else {
-            // Folder doesn't exist, create it
-            console.log(`   📁 Creating new transfer folder: ${transferId}...`);
-            try {
-              const createFolderRes = await fetch(
-                `https://api.frame.io/v2/assets/${rootAssetId}/children`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
-                    "Content-Type": "application/json"
-                  },
-                  body: JSON.stringify({
-                    name: transferId,
-                    type: "folder"
-                  })
-                }
-              );
-
-              if (createFolderRes.ok) {
-                const folderData = await createFolderRes.json();
-                console.log(`   ✅ Created transfer folder: ${folderData.id}`);
-                parentAssetId = folderData.id;
-              } else {
-                const errorText = await createFolderRes.text();
-                console.warn(`   ⚠️  Failed to create folder: ${createFolderRes.status} - ${errorText}`);
-                console.log(`   ℹ️  Uploading to root instead`);
-              }
-            } catch (createErr) {
-              console.warn(`   ⚠️  Error creating folder: ${createErr.message}`);
-              console.log(`   ℹ️  Uploading to root instead`);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`   ⚠️  Could not search for transfer folder: ${err.message}`);
-        console.log(`   ℹ️  Uploading to root instead`);
-      }
+      console.log(`   Step 1.5: Ensuring transfer folder exists...`);
+      parentAssetId = await ensureTransferFolder(rootAssetId, transferId);
     }
     
     // Step 2: Create asset in target folder
