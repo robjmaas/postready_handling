@@ -50,6 +50,9 @@ const awsS3Client = new S3Client({
 // Cache for Frame.io dailies folder ID (to avoid creating it repeatedly)
 let frameIODailiesFolderId = null;
 
+// Map to track in-progress transfer folder creation to prevent race conditions
+const transferFolderCreationMap = new Map();
+
 // MediaConvert client (initialized if credentials available)
 let mediaConvertClient = null;
 if (AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && TRANSCODE_SERVICE === "mediaconvert") {
@@ -1692,12 +1695,28 @@ async function uploadToWasabi(localFilePath, s3Key) {
 
 /**
  * Ensure a transfer folder exists on Frame.io, creating it if necessary
+ * Uses a lock to prevent duplicate folder creation from concurrent requests
  * Returns the folder asset ID or root asset ID if folder operations fail
  */
 async function ensureTransferFolder(rootAssetId, transferId) {
   if (!transferId) {
     return rootAssetId;
   }
+
+  // If folder creation is already in progress, wait for it
+  if (transferFolderCreationMap.has(transferId)) {
+    console.log(`   ⏳ Waiting for concurrent folder creation to complete...`);
+    const folderId = await transferFolderCreationMap.get(transferId);
+    console.log(`   ✅ Using folder created by concurrent request: ${folderId}`);
+    return folderId;
+  }
+
+  // Create a promise that will be resolved when folder creation is done
+  let resolveFolder;
+  const folderPromise = new Promise(resolve => {
+    resolveFolder = resolve;
+  });
+  transferFolderCreationMap.set(transferId, folderPromise);
 
   try {
     // Get children of root to find folder with transfer ID name
@@ -1719,6 +1738,7 @@ async function ensureTransferFolder(rootAssetId, transferId) {
       
       if (transferFolder) {
         console.log(`   ✅ Using existing transfer folder: ${transferFolder.id}`);
+        resolveFolder(transferFolder.id);
         return transferFolder.id;
       }
     }
@@ -1743,15 +1763,23 @@ async function ensureTransferFolder(rootAssetId, transferId) {
     if (createFolderRes.ok) {
       const folderData = await createFolderRes.json();
       console.log(`   ✅ Created transfer folder: ${folderData.id}`);
+      resolveFolder(folderData.id);
       return folderData.id;
     } else {
       const errorText = await createFolderRes.text();
       console.warn(`   ⚠️  Failed to create folder: ${createFolderRes.status} - ${errorText}`);
+      resolveFolder(rootAssetId);
       return rootAssetId;
     }
   } catch (err) {
     console.warn(`   ⚠️  Could not ensure transfer folder: ${err.message}`);
+    resolveFolder(rootAssetId);
     return rootAssetId;
+  } finally {
+    // Clean up the map entry after a short delay to allow other concurrent requests to benefit from it
+    setTimeout(() => {
+      transferFolderCreationMap.delete(transferId);
+    }, 100);
   }
 }
 
