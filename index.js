@@ -1251,7 +1251,10 @@ async function sendToMediaConvert(downloadUrl, filename, templateName = "Postrea
         Mode: "DISABLED"
       },
       StatusUpdateInterval: "SECONDS_60",
-      Priority: 0
+      Priority: 0,
+      UserMetadata: {
+        transferId: transferId || ""
+      }
     });
 
     console.log(`Sending job creation request...`);
@@ -2974,6 +2977,9 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
         
         console.log(`   Extracted output key: ${outputKey}`);
         
+        // Get transfer ID for audio upload
+        const transferId = message.detail?.userMetadata?.transferId;
+        
         // Get signed URL for Frame.io (non-blocking)
         getSignedS3Url(outputKey)
           .then((signedUrl) => {
@@ -2982,11 +2988,24 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
             updateCoconutJob(jobId, "completed", outputPath);
             // Upload to Frame.io
             uploadToFrameIO(signedUrl, outputKey)
+              .then(() => {
+                // After video uploads, upload audio files
+                if (transferId) {
+                  console.log(`🎵 Starting audio upload for transfer: ${transferId}`);
+                  uploadAudioFilesForTransfer(transferId)
+                    .catch(err => console.warn(`Audio upload failed: ${err.message}`));
+                }
+              })
               .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
           })
           .catch(err => {
             console.error(`❌ Failed to get signed URL: ${err.message}`);
             updateCoconutJob(jobId, "completed", outputPath);
+            // Still try audio upload
+            if (transferId) {
+              uploadAudioFilesForTransfer(transferId)
+                .catch(err => console.warn(`Audio upload failed: ${err.message}`));
+            }
           });
       } else {
         console.error(`❌ No output file found in MediaConvert response`);
