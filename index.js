@@ -1779,8 +1779,54 @@ async function uploadToFrameIO(videoUrl, filename) {
 }
 
 /**
- * Store a new Coconut job in the database
+ * Upload audio files for a transfer to Frame.io as separate assets
  */
+async function uploadAudioFilesForTransfer(transferId) {
+  if (!transferId) {
+    console.log(`⏭️  No transfer ID provided, skipping audio upload`);
+    return;
+  }
+  
+  try {
+    console.log(`\n🎵 Uploading audio files for transfer: ${transferId}`);
+    
+    // Get audio files mapped to this transfer
+    const audioMappings = await db.all(
+      `SELECT tm.id, tm.audio_id, af.filename, af.s3_url 
+       FROM transfer_audio_mapping tm 
+       JOIN audio_files af ON tm.audio_id = af.id 
+       WHERE tm.transfer_id = ?`,
+      [transferId]
+    );
+    
+    if (!audioMappings || audioMappings.length === 0) {
+      console.log(`   ℹ️  No audio files found for transfer`);
+      return;
+    }
+    
+    console.log(`   📊 Found ${audioMappings.length} audio file(s) to upload`);
+    
+    for (const mapping of audioMappings) {
+      try {
+        console.log(`   🎧 Uploading: ${mapping.filename}`);
+        const result = await uploadToFrameIO(mapping.s3_url, mapping.filename);
+        if (result) {
+          console.log(`      ✅ Audio asset created: ${result.id}`);
+        } else {
+          console.warn(`      ⚠️  Audio upload skipped`);
+        }
+      } catch (err) {
+        console.error(`      ❌ Failed to upload ${mapping.filename}: ${err.message}`);
+      }
+    }
+    
+    console.log(`\n✅ Audio upload attempt complete`);
+  } catch (err) {
+    console.error(`❌ Error uploading audio files: ${err.message}`);
+  }
+}
+
+/**
 async function storeCoconutJob(jobId, transferId, filename) {
   await db.run(
     "INSERT INTO coconut_jobs (id, transfer_id, filename, status) VALUES (?, ?, ?, ?)",
@@ -2795,6 +2841,9 @@ app.post("/webhooks/coconut", async (req, res) => {
         console.log(`🎬 MediaConvert job detected - skipping FFmpeg (already has LUT + timecode)`);
         console.log(`📤 Video is ready in Wasabi: ${outputUrl}`);
         
+        // Get transfer ID from job metadata to find audio files
+        const transferId = jobRow?.transfer_id;
+        
         // Go directly to Frame.io upload for MediaConvert jobs
         uploadToFrameIO(outputUrl, originalFilename)
           .then((frameioResult) => {
@@ -2803,9 +2852,19 @@ app.post("/webhooks/coconut", async (req, res) => {
             } else {
               console.warn(`⚠️  Frame.io upload skipped or failed (video is safe in Wasabi)`);
             }
+            
+            // After video upload, upload any mapped audio files
+            if (transferId) {
+              uploadAudioFilesForTransfer(transferId);
+            }
           })
           .catch((err) => {
             console.error(`⚠️  Frame.io upload failed: ${err.message}`);
+            
+            // Still try to upload audio even if video upload fails
+            if (transferId) {
+              uploadAudioFilesForTransfer(transferId);
+            }
           });
       } else {
         // For Coconut jobs, apply FFmpeg post-processing for LUT color grading
