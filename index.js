@@ -1733,7 +1733,7 @@ async function uploadToFrameIO(videoUrl, filename, transferId = null) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 1.5: If transfer ID provided, try to find a folder with that name
+    // Step 1.5: If transfer ID provided, find or create a folder with that name
     let parentAssetId = rootAssetId;
     if (transferId) {
       console.log(`   Step 1.5: Looking for transfer folder: ${transferId}...`);
@@ -1756,10 +1756,40 @@ async function uploadToFrameIO(videoUrl, filename, transferId = null) {
           const transferFolder = folders.find(f => f.name === transferId);
           
           if (transferFolder) {
-            console.log(`   ✅ Found transfer folder: ${transferFolder.id}`);
+            console.log(`   ✅ Found existing transfer folder: ${transferFolder.id}`);
             parentAssetId = transferFolder.id;
           } else {
-            console.log(`   ℹ️  No folder named "${transferId}" found, uploading to root`);
+            // Folder doesn't exist, create it
+            console.log(`   📁 Creating new transfer folder: ${transferId}...`);
+            try {
+              const createFolderRes = await fetch(
+                `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+                    "Content-Type": "application/json"
+                  },
+                  body: JSON.stringify({
+                    name: transferId,
+                    type: "folder"
+                  })
+                }
+              );
+
+              if (createFolderRes.ok) {
+                const folderData = await createFolderRes.json();
+                console.log(`   ✅ Created transfer folder: ${folderData.id}`);
+                parentAssetId = folderData.id;
+              } else {
+                const errorText = await createFolderRes.text();
+                console.warn(`   ⚠️  Failed to create folder: ${createFolderRes.status} - ${errorText}`);
+                console.log(`   ℹ️  Uploading to root instead`);
+              }
+            } catch (createErr) {
+              console.warn(`   ⚠️  Error creating folder: ${createErr.message}`);
+              console.log(`   ℹ️  Uploading to root instead`);
+            }
           }
         }
       } catch (err) {
