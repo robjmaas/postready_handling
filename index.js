@@ -1693,7 +1693,7 @@ async function uploadToWasabi(localFilePath, s3Key) {
 /**
  * Upload a video to Frame.io
  */
-async function uploadToFrameIO(videoUrl, filename) {
+async function uploadToFrameIO(videoUrl, filename, transferId = null) {
   if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
     console.warn("⚠️  Frame.io credentials not configured, skipping upload");
     return null;
@@ -1733,8 +1733,43 @@ async function uploadToFrameIO(videoUrl, filename) {
 
     console.log(`   Root asset ID: ${rootAssetId}`);
     
-    // Step 2: Create asset directly in root folder (no subfolder)
-    console.log(`   Step 2: Creating asset in project root...`);
+    // Step 1.5: If transfer ID provided, try to find a folder with that name
+    let parentAssetId = rootAssetId;
+    if (transferId) {
+      console.log(`   Step 1.5: Looking for transfer folder: ${transferId}...`);
+      try {
+        // Get children of root to find folder with transfer ID name
+        const childrenRes = await fetch(
+          `https://api.frame.io/v2/assets/${rootAssetId}/children?filter_type=folder`,
+          {
+            method: "GET",
+            headers: {
+              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+              "Content-Type": "application/json"
+            }
+          }
+        );
+
+        if (childrenRes.ok) {
+          const childrenData = await childrenRes.json();
+          const folders = childrenData.children || [];
+          const transferFolder = folders.find(f => f.name === transferId);
+          
+          if (transferFolder) {
+            console.log(`   ✅ Found transfer folder: ${transferFolder.id}`);
+            parentAssetId = transferFolder.id;
+          } else {
+            console.log(`   ℹ️  No folder named "${transferId}" found, uploading to root`);
+          }
+        }
+      } catch (err) {
+        console.warn(`   ⚠️  Could not search for transfer folder: ${err.message}`);
+        console.log(`   ℹ️  Uploading to root instead`);
+      }
+    }
+    
+    // Step 2: Create asset in target folder
+    console.log(`   Step 2: Creating asset in folder...`);
     
     // Create asset with source pointing to presigned URL
     // Frame.io will asynchronously download the file from this URL
@@ -1748,7 +1783,7 @@ async function uploadToFrameIO(videoUrl, filename) {
     };
     
     const createRes = await fetch(
-      `https://api.frame.io/v2/assets/${rootAssetId}/children`,
+      `https://api.frame.io/v2/assets/${parentAssetId}/children`,
       {
         method: "POST",
         headers: {
@@ -1812,7 +1847,7 @@ async function uploadAudioFilesForTransfer(transferId) {
     for (const mapping of audioMappings) {
       try {
         console.log(`   🎧 Uploading: ${mapping.filename}`);
-        const result = await uploadToFrameIO(mapping.s3_url, mapping.filename);
+        const result = await uploadToFrameIO(mapping.s3_url, mapping.filename, transferId);
         if (result) {
           console.log(`      ✅ Audio asset created: ${result.id}`);
         } else {
@@ -2848,7 +2883,7 @@ app.post("/webhooks/coconut", async (req, res) => {
         const transferId = jobRow?.transfer_id;
         
         // Go directly to Frame.io upload for MediaConvert jobs
-        uploadToFrameIO(outputUrl, originalFilename)
+        uploadToFrameIO(outputUrl, originalFilename, transferId)
           .then((frameioResult) => {
             if (frameioResult) {
               console.log(`✅ Uploaded to Frame.io: ${frameioResult.id}`);
@@ -3502,7 +3537,7 @@ async function pollPendingMediaConvertJobs() {
             console.log(`📎 Frame.io URL: ${frameioUrl.substring(0, 100)}...`);
 
             // Upload to Frame.io with presigned URL
-            uploadToFrameIO(frameioUrl, originalFilename)
+            uploadToFrameIO(frameioUrl, originalFilename, job.transfer_id)
               .then((frameioResult) => {
                 if (frameioResult) {
                   console.log(`✅ Uploaded to Frame.io: ${frameioResult.id}`);
