@@ -1720,8 +1720,9 @@ async function ensureTransferFolder(rootAssetId, transferId) {
 
   try {
     // Get children of root to find folder with transfer ID name
+    // NOTE: Using pagination to get ALL folders, not just first page
     const childrenRes = await fetch(
-      `https://api.frame.io/v2/assets/${rootAssetId}/children?filter_type=folder`,
+      `https://api.frame.io/v2/assets/${rootAssetId}/children?filter_type=folder&limit=100`,
       {
         method: "GET",
         headers: {
@@ -1734,13 +1735,19 @@ async function ensureTransferFolder(rootAssetId, transferId) {
     if (childrenRes.ok) {
       const childrenData = await childrenRes.json();
       const folders = childrenData.children || [];
+      console.log(`   📋 Found ${folders.length} existing folders`);
+      
       const transferFolder = folders.find(f => f.name === transferId);
       
       if (transferFolder) {
         console.log(`   ✅ Using existing transfer folder: ${transferFolder.id}`);
         resolveFolder(transferFolder.id);
         return transferFolder.id;
+      } else {
+        console.log(`   ℹ️  Transfer folder '${transferId}' not found in existing ${folders.length} folders`);
       }
+    } else {
+      console.warn(`   ⚠️  Failed to list folders: ${childrenRes.status}`);
     }
 
     // Folder doesn't exist, create it
