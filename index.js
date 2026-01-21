@@ -227,6 +227,13 @@ async function initDb() {
       FOREIGN KEY(audio_id) REFERENCES audio_files(id),
       UNIQUE(transfer_id, audio_id)
     );
+
+    CREATE TABLE IF NOT EXISTS frameio_transfer_folders (
+      transfer_id TEXT PRIMARY KEY,
+      folder_id TEXT NOT NULL,
+      root_asset_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Add metadata column if it doesn't exist (for S3 staging key storage)
@@ -1699,8 +1706,7 @@ async function uploadToWasabi(localFilePath, s3Key) {
 
 /**
  * Ensure a transfer folder exists on Frame.io, creating it if necessary
- * Uses a lock to prevent duplicate folder creation from concurrent requests
- * Uses cache to prevent duplicate folders when API doesn't immediately return new items
+ * Stores folder ID in database to prevent duplicate creation across concurrent requests
  * Returns the folder asset ID or root asset ID if folder operations fail
  */
 async function ensureTransferFolder(rootAssetId, transferId) {
@@ -1708,11 +1714,19 @@ async function ensureTransferFolder(rootAssetId, transferId) {
     return rootAssetId;
   }
 
-  // Check cache first - if we recently created this folder, use it
-  if (transferFolderCache.has(transferId)) {
-    const cachedFolderId = transferFolderCache.get(transferId);
-    console.log(`   ✅ Using cached transfer folder: ${cachedFolderId}`);
-    return cachedFolderId;
+  // Check database first - if folder already exists, use it
+  try {
+    const existingFolder = await db.get(
+      "SELECT folder_id FROM frameio_transfer_folders WHERE transfer_id = ?",
+      [transferId]
+    );
+    
+    if (existingFolder) {
+      console.log(`   ✅ Using existing transfer folder from DB: ${existingFolder.folder_id}`);
+      return existingFolder.folder_id;
+    }
+  } catch (err) {
+    console.warn(`   ⚠️  Could not check database for folder: ${err.message}`);
   }
 
   // If folder creation is already in progress, wait for it
@@ -1732,7 +1746,7 @@ async function ensureTransferFolder(rootAssetId, transferId) {
 
   try {
     // Get children of root to find folder with transfer ID name
-    // NOTE: Using pagination to get ALL folders, not just first page
+    // Include limit to get more folders, use offset for pagination if needed
     const childrenRes = await fetch(
       `https://api.frame.io/v2/assets/${rootAssetId}/children?filter_type=folder&limit=100`,
       {
@@ -1753,8 +1767,18 @@ async function ensureTransferFolder(rootAssetId, transferId) {
       
       if (transferFolder) {
         console.log(`   ✅ Using existing transfer folder: ${transferFolder.id}`);
-        // Cache it for future requests
-        transferFolderCache.set(transferId, transferFolder.id);
+        
+        // Save to database to prevent duplicate creation
+        try {
+          await db.run(
+            `INSERT OR IGNORE INTO frameio_transfer_folders (transfer_id, folder_id, root_asset_id) 
+             VALUES (?, ?, ?)`,
+            [transferId, transferFolder.id, rootAssetId]
+          );
+        } catch (err) {
+          console.warn(`   ⚠️  Could not save folder to database: ${err.message}`);
+        }
+        
         resolveFolder(transferFolder.id);
         return transferFolder.id;
       } else {
@@ -1785,15 +1809,19 @@ async function ensureTransferFolder(rootAssetId, transferId) {
       const folderData = await createFolderRes.json();
       console.log(`   ✅ Created transfer folder: ${folderData.id}`);
       
-      // Cache it immediately to prevent duplicate creation from concurrent requests
-      transferFolderCache.set(transferId, folderData.id);
+      // Save to database immediately to prevent duplicate creation from other concurrent requests
+      try {
+        await db.run(
+          `INSERT OR IGNORE INTO frameio_transfer_folders (transfer_id, folder_id, root_asset_id) 
+           VALUES (?, ?, ?)`,
+          [transferId, folderData.id, rootAssetId]
+        );
+        console.log(`   💾 Saved folder ID to database`);
+      } catch (err) {
+        console.warn(`   ⚠️  Could not save folder to database: ${err.message}`);
+      }
+      
       resolveFolder(folderData.id);
-      
-      // Keep cache for 5 minutes in case concurrent uploads are still happening
-      setTimeout(() => {
-        transferFolderCache.delete(transferId);
-      }, 300000);
-      
       return folderData.id;
     } else {
       const errorText = await createFolderRes.text();
