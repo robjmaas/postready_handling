@@ -731,7 +731,6 @@ async function stageFileToS3(downloadUrl, filename) {
     throw err;
   }
 }
-}
 
 /**
  * Get file size with HEAD or GET request
@@ -750,6 +749,154 @@ async function getFileSizeAsync(url, protocol) {
  * Create readable stream that downloads file with parallel Range requests
  * Simplified version that immediately starts streaming
  */
+function createParallelRangeStream(url, fileSize, protocol) {
+  const CHUNK_SIZE = 50 * 1024 * 1024;
+  const MAX_PARALLEL = 4;
+  
+  let chunkIndex = 0;
+  let downloadedBytes = 0;
+  let lastLogTime = Date.now();
+  const chunks = {};
+  let nextChunkToStream = 0;
+  let streamEnded = false;
+  
+  const stream = new Readable({
+    read() {
+      // Try to stream any completed chunks
+      streamChunksInOrder();
+      // Download more if needed
+      downloadChunksInParallel();
+    }
+  });
+  
+  function downloadChunksInParallel() {
+    if (fileSize === 0) {
+      stream.push(null);
+      return;
+    }
+    
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+    
+    for (let i = chunkIndex; i < Math.min(chunkIndex + MAX_PARALLEL, totalChunks); i++) {
+      if (chunks[i] === undefined) {
+        downloadChunk(i, CHUNK_SIZE, fileSize, protocol, url, totalChunks);
+      }
+    }
+    chunkIndex = Math.min(chunkIndex + MAX_PARALLEL, totalChunks);
+  }
+  
+  function downloadChunk(idx, size, total, protocol, url, totalChunks) {
+    chunks[idx] = null; // Mark as downloading
+    
+    const start = idx * size;
+    const end = Math.min(start + size - 1, total - 1);
+    const rangeHeader = `bytes=${start}-${end}`;
+    
+    const req = protocol.request(url, {
+      headers: {
+        'Range': rangeHeader,
+        'User-Agent': 'Postready MediaConvert v1.0'
+      },
+      timeout: 4 * 60 * 60 * 1000
+    }, (res) => {
+      if (res.statusCode !== 206 && res.statusCode !== 200) {
+        console.warn(`⚠️  Range request returned ${res.statusCode}, trying without Range...`);
+        // Fallback: download without range
+        downloadChunkFallback(idx, protocol, url);
+        return;
+      }
+      
+      let data = Buffer.alloc(0);
+      
+      res.on('data', chunk => {
+        data = Buffer.concat([data, chunk]);
+      });
+      
+      res.on('end', () => {
+        chunks[idx] = data;
+        downloadedBytes += data.length;
+        
+        // Log progress every 10 seconds
+        const now = Date.now();
+        if (now - lastLogTime > 10000) {
+          const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
+          const gbTotal = (total / 1024 / 1024 / 1024).toFixed(2);
+          const pct = ((downloadedBytes / total) * 100).toFixed(1);
+          console.log(`   📥 Upload progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
+          lastLogTime = now;
+        }
+        
+        // Try to stream chunks in order
+        streamChunksInOrder();
+        
+        // Check if we're done
+        checkIfComplete(totalChunks);
+      });
+    });
+    
+    req.on('error', err => {
+      console.warn(`⚠️  Chunk ${idx} failed: ${err.message}`);
+      chunks[idx] = undefined;
+      // Retry after delay
+      setTimeout(() => downloadChunk(idx, size, total, protocol, url, totalChunks), 2000);
+    });
+    
+    req.end();
+  }
+  
+  function downloadChunkFallback(idx, protocol, url) {
+    // Download entire file for first chunk (no Range support)
+    const req = protocol.request(url, {
+      timeout: 4 * 60 * 60 * 1000
+    }, (res) => {
+      let data = Buffer.alloc(0);
+      
+      res.on('data', chunk => {
+        data = Buffer.concat([data, chunk]);
+        downloadedBytes += chunk.length;
+      });
+      
+      res.on('end', () => {
+        chunks[0] = data;
+        streamChunksInOrder();
+        checkIfComplete(1);
+      });
+    });
+    
+    req.on('error', err => {
+      console.error(`❌ Fallback download failed: ${err.message}`);
+      stream.destroy(err);
+    });
+    
+    req.end();
+  }
+  
+  function streamChunksInOrder() {
+    while (chunks[nextChunkToStream] !== null && chunks[nextChunkToStream] !== undefined) {
+      const chunk = chunks[nextChunkToStream];
+      stream.push(chunk);
+      delete chunks[nextChunkToStream];
+      nextChunkToStream++;
+    }
+  }
+  
+  function checkIfComplete(totalChunks) {
+    // Check if all chunks downloaded
+    let allDownloaded = true;
+    for (let i = 0; i < totalChunks; i++) {
+      if (chunks[i] === undefined || chunks[i] === null) {
+        allDownloaded = false;
+        break;
+      }
+    }
+    
+    if (allDownloaded && !streamEnded) {
+      streamChunksInOrder();
+      streamEnded = true;
+      stream.push(null); // Signal end of stream
+    }
+  }
+}
 
 /**
  * Normalize audio file format for MediaConvert compatibility
