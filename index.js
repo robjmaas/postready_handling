@@ -651,8 +651,8 @@ async function stageFileToS3(downloadUrl, filename) {
             Body: response,
             ContentType: "video/mxf"
           },
-          partSize: 100 * 1024 * 1024, // 100MB parts (optimized for fast large file transfer)
-          queueSize: 8 // 8 concurrent parts (parallel uploads for speed)
+          partSize: 500 * 1024 * 1024, // 500MB parts (AWS max: 5GB, optimized for throughput)
+          queueSize: 16 // 16 concurrent parts (max parallelism for speed)
         });
         
         upload.done()
