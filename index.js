@@ -2200,6 +2200,7 @@ app.post("/transfer/:transferId/auto-detect-audio", async (req, res) => {
 
 /**
  * Confirm and process a transfer - requires manual approval
+ * NOTE: Processing runs in background - endpoint returns immediately
  */
 app.post("/process/transfer/:transferId", async (req, res) => {
   try {
@@ -2222,14 +2223,20 @@ app.post("/process/transfer/:transferId", async (req, res) => {
     // Mark as processing to avoid duplicates
     await markTransferProcessed(transferId);
     
-    // Start processing with selected job template
-    processFilemailTransfer(transferId, templateName);
+    // Return immediately - start processing in background (don't await)
+    // This prevents blocking health checks during large file uploads
+    setImmediate(() => {
+      processFilemailTransfer(transferId, templateName).catch(err => {
+        console.error(`Background processing failed for ${transferId}: ${err.message}`);
+      });
+    });
     
     res.json({ 
       success: true, 
-      message: "Transfer processing started",
+      message: "Transfer processing started in background",
       transferId,
       templateName,
+      note: "Large file uploads may take 10-30+ minutes. Check /db/jobs/{transferId} for status.",
       timestamp: new Date().toISOString()
     });
   } catch (err) {
