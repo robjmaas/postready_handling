@@ -613,7 +613,6 @@ async function stageFileToS3(downloadUrl, filename) {
       }
       
       // Download with parallel Range requests
-      const { Readable } = require('stream');
       const parallelStream = createParallelRangeStream(downloadUrl, fileSize, protocol);
       
       // Ensure bucket exists
