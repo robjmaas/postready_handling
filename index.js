@@ -9,6 +9,7 @@ import path from "path";
 import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
+import { Readable } from "stream";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, CreateBucketCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
@@ -665,7 +666,6 @@ async function getFileSizeAsync(url, protocol) {
 function createParallelRangeStream(url, fileSize, protocol) {
   const CHUNK_SIZE = 50 * 1024 * 1024;
   const MAX_PARALLEL = 4;
-  const { Readable } = require('stream');
   
   let chunkIndex = 0;
   let downloadedBytes = 0;
