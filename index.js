@@ -602,6 +602,8 @@ async function stageFileToS3(downloadUrl, filename) {
       console.log(`📥 Streaming to AWS S3 (parallel Range chunks): ${filename}`);
       console.log(`   S3 key: ${stagingKey}`);
       
+      const uploadStartTime = Date.now();
+      
       const protocol = downloadUrl.startsWith('https') ? https : http;
       
       // Get file size first
@@ -634,10 +636,15 @@ async function stageFileToS3(downloadUrl, filename) {
       
       upload.done()
         .then(() => {
-          console.log(`   ✅ Streamed to AWS S3: s3://postready-staging/${stagingKey}`);
+          console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
+          console.log(`   File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
+          console.log(`   Duration: ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} minutes`);
           resolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
         })
-        .catch(reject);
+        .catch(err => {
+          console.error(`❌ S3 UPLOAD FAILED: ${err.message}`);
+          reject(err);
+        });
         
     } catch (err) {
       console.error(`❌ S3 staging error: ${err.message}`);
@@ -714,12 +721,14 @@ function createParallelRangeStream(url, fileSize, protocol) {
         chunks[idx] = data;
         downloadedBytes += data.length;
         
-        // Log progress
+        // Log progress every 10 seconds
         const now = Date.now();
-        if (now - lastLogTime > 30000) {
+        if (now - lastLogTime > 10000) {
           const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
-          const mbps = ((downloadedBytes / (1024*1024)) / ((now - lastLogTime + 30000) / 1000)).toFixed(1);
-          console.log(`   📥 Streamed: ${gbDownloaded} GB (~${mbps} Mbps, ${MAX_PARALLEL} parallel chunks)`);
+          const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
+          const pct = ((downloadedBytes / fileSize) * 100).toFixed(1);
+          const mbps = ((downloadedBytes / (1024*1024)) / ((now - Date.now() + downloadedBytes) / 1000)).toFixed(1);
+          console.log(`   📥 Upload progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
           lastLogTime = now;
         }
         
