@@ -631,7 +631,9 @@ async function stageFileToS3(downloadUrl, filename) {
           // Log progress every 30 seconds
           if (now - lastLogTime > 30 * 1000) {
             const gbDownloaded = (bytesDownloaded / 1024 / 1024 / 1024).toFixed(2);
-            console.log(`   📥 Streamed: ${gbDownloaded} GB (uploading simultaneously...)`);
+            const elapsedSecs = (now - Date.now() + bytesDownloaded) / 1000;
+            const throughputMbps = (bytesDownloaded / (1024 * 1024)) / Math.max(1, elapsedSecs / 1000);
+            console.log(`   📥 Streamed: ${gbDownloaded} GB (~${throughputMbps.toFixed(1)} Mbps, uploading with 8 concurrent parts...)`);
             lastLogTime = now;
           }
         });
@@ -649,8 +651,8 @@ async function stageFileToS3(downloadUrl, filename) {
             Body: response,
             ContentType: "video/mxf"
           },
-          partSize: 50 * 1024 * 1024, // 50MB parts (good for large files)
-          queueSize: 4 // 4 concurrent parts
+          partSize: 100 * 1024 * 1024, // 100MB parts (optimized for fast large file transfer)
+          queueSize: 8 // 8 concurrent parts (parallel uploads for speed)
         });
         
         upload.done()
