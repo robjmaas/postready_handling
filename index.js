@@ -652,11 +652,39 @@ async function stageFileToS3(downloadUrl, filename) {
   const MAX_PARALLEL = 4; // Filemail recommended parallelism
   
   return new Promise(async (resolve, reject) => {
+    const uploadTimeoutMs = 2 * 60 * 60 * 1000; // 2 hour timeout
+    let uploadTimeout;
+    let resolved = false;
+    
+    const cleanup = () => {
+      if (uploadTimeout) clearTimeout(uploadTimeout);
+      resolved = true;
+    };
+    
+    const safeResolve = (val) => {
+      if (!resolved) {
+        cleanup();
+        resolve(val);
+      }
+    };
+    
+    const safeReject = (err) => {
+      if (!resolved) {
+        cleanup();
+        reject(err);
+      }
+    };
+    
     try {
       console.log(`📥 Streaming to AWS S3 (parallel Range chunks): ${filename}`);
       console.log(`   S3 key: ${stagingKey}`);
       
       const uploadStartTime = Date.now();
+      
+      // Set timeout for entire upload
+      uploadTimeout = setTimeout(() => {
+        safeReject(new Error(`S3 upload timeout after ${uploadTimeoutMs / 1000 / 60 / 60} hours`));
+      }, uploadTimeoutMs);
       
       const protocol = downloadUrl.startsWith('https') ? https : http;
       
@@ -672,7 +700,7 @@ async function stageFileToS3(downloadUrl, filename) {
       const parallelStream = createParallelRangeStream(downloadUrl, fileSize, protocol);
       
       // Ensure bucket exists
-      awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
+      await awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
         .catch(() => {});
       
       // Upload to S3
@@ -693,16 +721,16 @@ async function stageFileToS3(downloadUrl, filename) {
           console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
           console.log(`   File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
           console.log(`   Duration: ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} minutes`);
-          resolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
+          safeResolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
         })
         .catch(err => {
           console.error(`❌ S3 UPLOAD FAILED: ${err.message}`);
-          reject(err);
+          safeReject(err);
         });
         
     } catch (err) {
       console.error(`❌ S3 staging error: ${err.message}`);
-      reject(err);
+      safeReject(err);
     }
   });
 }
