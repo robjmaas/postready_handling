@@ -585,106 +585,168 @@ async function sendToCoconut(downloadUrl, filename) {
 }
 
 /**
- * Stage video file directly from Filemail to AWS S3 using streaming
- * Eliminates disk storage requirement - works with files of any size (50GB+)
- * Uses multipart upload for reliable transfer of large files
+ * Stage video file with parallel Filemail Range downloads (premium tier optimization)
+ * Uses Filemail's recommended 50MB chunks with up to 4 parallel requests
+ * Expected: 4-16x faster downloads vs single connection
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
-  // Use simple random ID to avoid MediaConvert appending input filename to output
   const stagingId = Math.random().toString(36).substring(2, 10);
   const stagingKey = `staging/tmp_${stagingId}`;
+  const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB (Filemail recommended)
+  const MAX_PARALLEL = 4; // Filemail recommended parallelism
   
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     try {
-      console.log(`📥 Streaming to AWS S3 (no disk storage): ${filename}`);
+      console.log(`📥 Streaming to AWS S3 (parallel Range chunks): ${filename}`);
       console.log(`   S3 key: ${stagingKey}`);
-      console.log(`   Downloading and uploading simultaneously (zero-copy streaming)...`);
       
       const protocol = downloadUrl.startsWith('https') ? https : http;
-      let bytesDownloaded = 0;
-      let lastLogTime = Date.now();
       
-      // Start downloading from Filemail
-      const req = protocol.get(downloadUrl, { timeout: 4 * 60 * 60 * 1000 }, (response) => {
-        // Handle redirects
-        if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-          console.log(`   Following redirect...`);
-          return stageFileToS3(response.headers.location, filename).then(resolve).catch(reject);
-        }
-        
-        if (response.statusCode !== 200) {
-          return reject(new Error(`HTTP ${response.statusCode}: ${downloadUrl}`));
-        }
-        
-        // Get file size from Content-Length header
-        const fileSize = parseInt(response.headers['content-length'] || '0', 10);
-        if (fileSize > 0) {
-          console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
-        }
-        
-        // Track download progress
-        response.on('data', (chunk) => {
-          bytesDownloaded += chunk.length;
-          const now = Date.now();
-          
-          // Log progress every 30 seconds
-          if (now - lastLogTime > 30 * 1000) {
-            const gbDownloaded = (bytesDownloaded / 1024 / 1024 / 1024).toFixed(2);
-            const elapsedSecs = (now - Date.now() + bytesDownloaded) / 1000;
-            const throughputMbps = (bytesDownloaded / (1024 * 1024)) / Math.max(1, elapsedSecs / 1000);
-            console.log(`   📥 Streamed: ${gbDownloaded} GB (~${throughputMbps.toFixed(1)} Mbps, uploading with 8 concurrent parts...)`);
-            lastLogTime = now;
-          }
-        });
-        
-        // Ensure bucket exists (non-blocking)
-        awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
-          .catch(() => {}); // Ignore errors, bucket likely exists
-        
-        // Stream directly to S3 using multipart upload (handles unlimited file sizes)
-        const upload = new Upload({
-          client: awsS3Client,
-          params: {
-            Bucket: "postready-staging",
-            Key: stagingKey,
-            Body: response,
-            ContentType: "video/mxf"
-          },
-          partSize: 2 * 1024 * 1024 * 1024, // 2GB parts (AWS max: 5GB, optimized for 6GB Fly memory)
-          queueSize: 4 // 4 concurrent parts (safe with 6GB Fly memory)
-        });
-        
-        upload.done()
-          .then(() => {
-            console.log(`   ✅ Streamed to AWS S3: s3://postready-staging/${stagingKey}`);
-            resolve({ 
-              s3Url: `s3://postready-staging/${stagingKey}`, 
-              stagingKey,
-              tempLocalPath: null // No temp file in streaming mode
-            });
-          })
-          .catch((err) => {
-            console.error(`❌ S3 staging failed: ${err.message}`);
-            reject(err);
-          });
+      // Get file size first
+      const fileSize = await getFileSizeAsync(downloadUrl, protocol);
+      if (fileSize > 0) {
+        const chunkCount = Math.ceil(fileSize / CHUNK_SIZE);
+        console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
+        console.log(`   📦 Chunks: ${chunkCount} × 50MB (${MAX_PARALLEL} parallel)`);
+      }
+      
+      // Download with parallel Range requests
+      const { Readable } = require('stream');
+      const parallelStream = createParallelRangeStream(downloadUrl, fileSize, protocol);
+      
+      // Ensure bucket exists
+      awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
+        .catch(() => {});
+      
+      // Upload to S3
+      const upload = new Upload({
+        client: awsS3Client,
+        params: {
+          Bucket: "postready-staging",
+          Key: stagingKey,
+          Body: parallelStream,
+          ContentType: "video/mxf"
+        },
+        partSize: 2 * 1024 * 1024 * 1024,
+        queueSize: 4
       });
       
-      req.on('error', (err) => {
-        console.error(`❌ Download failed: ${err.message}`);
-        reject(err);
-      });
-      
-      req.on('timeout', () => {
-        req.abort();
-        reject(new Error("Download timeout (4 hours exceeded)"));
-      });
-      
+      upload.done()
+        .then(() => {
+          console.log(`   ✅ Streamed to AWS S3: s3://postready-staging/${stagingKey}`);
+          resolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
+        })
+        .catch(reject);
+        
     } catch (err) {
       console.error(`❌ S3 staging error: ${err.message}`);
       reject(err);
     }
   });
+}
+
+/**
+ * Get file size with HEAD or GET request
+ */
+async function getFileSizeAsync(url, protocol) {
+  return new Promise((resolve) => {
+    const req = protocol.request(url, { method: 'HEAD', timeout: 10000 }, (res) => {
+      resolve(parseInt(res.headers['content-length'] || '0', 10));
+    });
+    req.on('error', () => resolve(0));
+    req.end();
+  });
+}
+
+/**
+ * Create readable stream that downloads file with parallel Range requests
+ */
+function createParallelRangeStream(url, fileSize, protocol) {
+  const CHUNK_SIZE = 50 * 1024 * 1024;
+  const MAX_PARALLEL = 4;
+  const { Readable } = require('stream');
+  
+  let chunkIndex = 0;
+  let downloadedBytes = 0;
+  let lastLogTime = Date.now();
+  const chunks = {};
+  let nextChunkToStream = 0;
+  
+  const stream = new Readable({
+    read() {
+      // Trigger parallel chunk downloads
+      downloadChunksInParallel();
+    }
+  });
+  
+  function downloadChunksInParallel() {
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+    
+    for (let i = chunkIndex; i < Math.min(chunkIndex + MAX_PARALLEL, totalChunks); i++) {
+      if (chunks[i] === undefined) {
+        downloadChunk(i, CHUNK_SIZE, fileSize, protocol, url);
+      }
+    }
+    chunkIndex = Math.min(chunkIndex + MAX_PARALLEL, totalChunks);
+  }
+  
+  function downloadChunk(idx, size, total, protocol, url) {
+    chunks[idx] = null; // Mark as downloading
+    
+    const start = idx * size;
+    const end = Math.min(start + size - 1, total - 1);
+    const rangeHeader = `bytes=${start}-${end}`;
+    
+    const req = protocol.request(url, {
+      headers: {
+        'Range': rangeHeader,
+        'User-Agent': 'Postready MediaConvert v1.0'
+      },
+      timeout: 4 * 60 * 60 * 1000
+    }, (res) => {
+      let data = Buffer.alloc(0);
+      
+      res.on('data', chunk => {
+        data = Buffer.concat([data, chunk]);
+      });
+      
+      res.on('end', () => {
+        chunks[idx] = data;
+        downloadedBytes += data.length;
+        
+        // Log progress
+        const now = Date.now();
+        if (now - lastLogTime > 30000) {
+          const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
+          const mbps = ((downloadedBytes / (1024*1024)) / ((now - lastLogTime + 30000) / 1000)).toFixed(1);
+          console.log(`   📥 Streamed: ${gbDownloaded} GB (~${mbps} Mbps, ${MAX_PARALLEL} parallel chunks)`);
+          lastLogTime = now;
+        }
+        
+        streamChunksInOrder();
+        downloadChunksInParallel();
+      });
+    });
+    
+    req.on('error', err => {
+      console.warn(`⚠️  Chunk ${idx} failed: ${err.message}, retrying...`);
+      chunks[idx] = undefined;
+      setTimeout(() => downloadChunk(idx, size, total, protocol, url), 1000);
+    });
+    
+    req.end();
+  }
+  
+  function streamChunksInOrder() {
+    while (chunks[nextChunkToStream] !== null && chunks[nextChunkToStream] !== undefined) {
+      stream.push(chunks[nextChunkToStream]);
+      delete chunks[nextChunkToStream];
+      nextChunkToStream++;
+    }
+  }
+  
+  return stream;
 }
 
 /**
