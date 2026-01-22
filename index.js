@@ -303,6 +303,60 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", uptime: process.uptime() });
 });
 
+/**
+ * Real-time status for a transfer
+ * Shows current processing status, job details, and progress
+ */
+app.get("/status/transfer/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    
+    // Check if transfer is processed
+    const transfer = await db.get("SELECT * FROM processed_transfers WHERE id = ?", [transferId]);
+    
+    // Get all jobs for this transfer
+    const jobs = await db.all("SELECT * FROM coconut_jobs WHERE transfer_id = ? ORDER BY created_at DESC", [transferId]);
+    
+    if (!transfer) {
+      return res.json({
+        transferId,
+        status: "pending",
+        message: "Transfer not yet processed",
+        jobs: []
+      });
+    }
+    
+    // Calculate summary stats
+    const totalJobs = jobs.length;
+    const completedJobs = jobs.filter(j => j.status === "completed").length;
+    const failedJobs = jobs.filter(j => j.status === "failed").length;
+    const processingJobs = jobs.filter(j => j.status === "pending").length;
+    
+    return res.json({
+      transferId,
+      status: transfer.status,
+      created_at: transfer.created_at,
+      summary: {
+        total_jobs: totalJobs,
+        completed: completedJobs,
+        failed: failedJobs,
+        processing: processingJobs
+      },
+      jobs: jobs.map(j => ({
+        job_id: j.id,
+        filename: j.filename,
+        status: j.status,
+        output_url: j.output_url,
+        error: j.error,
+        created_at: j.created_at,
+        completed_at: j.completed_at
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Ping endpoint for webhook verification
 app.get("/webhooks/coconut", (req, res) => {
   res.status(200).json({ 
