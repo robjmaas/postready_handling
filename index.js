@@ -750,6 +750,7 @@ async function getFileSizeAsync(url, protocol) {
 
 /**
  * Create readable stream that downloads file with parallel Range requests
+ * Simplified version that immediately starts streaming
  */
 function createParallelRangeStream(url, fileSize, protocol) {
   const CHUNK_SIZE = 50 * 1024 * 1024;
@@ -760,26 +761,34 @@ function createParallelRangeStream(url, fileSize, protocol) {
   let lastLogTime = Date.now();
   const chunks = {};
   let nextChunkToStream = 0;
+  let streamEnded = false;
   
   const stream = new Readable({
     read() {
-      // Trigger parallel chunk downloads
+      // Try to stream any completed chunks
+      streamChunksInOrder();
+      // Download more if needed
       downloadChunksInParallel();
     }
   });
   
   function downloadChunksInParallel() {
+    if (fileSize === 0) {
+      stream.push(null);
+      return;
+    }
+    
     const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
     
     for (let i = chunkIndex; i < Math.min(chunkIndex + MAX_PARALLEL, totalChunks); i++) {
       if (chunks[i] === undefined) {
-        downloadChunk(i, CHUNK_SIZE, fileSize, protocol, url);
+        downloadChunk(i, CHUNK_SIZE, fileSize, protocol, url, totalChunks);
       }
     }
     chunkIndex = Math.min(chunkIndex + MAX_PARALLEL, totalChunks);
   }
   
-  function downloadChunk(idx, size, total, protocol, url) {
+  function downloadChunk(idx, size, total, protocol, url, totalChunks) {
     chunks[idx] = null; // Mark as downloading
     
     const start = idx * size;
@@ -793,6 +802,13 @@ function createParallelRangeStream(url, fileSize, protocol) {
       },
       timeout: 4 * 60 * 60 * 1000
     }, (res) => {
+      if (res.statusCode !== 206 && res.statusCode !== 200) {
+        console.warn(`⚠️  Range request returned ${res.statusCode}, trying without Range...`);
+        // Fallback: download without range
+        downloadChunkFallback(idx, protocol, url);
+        return;
+      }
+      
       let data = Buffer.alloc(0);
       
       res.on('data', chunk => {
@@ -807,22 +823,52 @@ function createParallelRangeStream(url, fileSize, protocol) {
         const now = Date.now();
         if (now - lastLogTime > 10000) {
           const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
-          const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
-          const pct = ((downloadedBytes / fileSize) * 100).toFixed(1);
-          const mbps = ((downloadedBytes / (1024*1024)) / ((now - Date.now() + downloadedBytes) / 1000)).toFixed(1);
+          const gbTotal = (total / 1024 / 1024 / 1024).toFixed(2);
+          const pct = ((downloadedBytes / total) * 100).toFixed(1);
           console.log(`   📥 Upload progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
           lastLogTime = now;
         }
         
+        // Try to stream chunks in order
         streamChunksInOrder();
-        downloadChunksInParallel();
+        
+        // Check if we're done
+        checkIfComplete(totalChunks);
       });
     });
     
     req.on('error', err => {
-      console.warn(`⚠️  Chunk ${idx} failed: ${err.message}, retrying...`);
+      console.warn(`⚠️  Chunk ${idx} failed: ${err.message}`);
       chunks[idx] = undefined;
-      setTimeout(() => downloadChunk(idx, size, total, protocol, url), 1000);
+      // Retry after delay
+      setTimeout(() => downloadChunk(idx, size, total, protocol, url, totalChunks), 2000);
+    });
+    
+    req.end();
+  }
+  
+  function downloadChunkFallback(idx, protocol, url) {
+    // Download entire file for first chunk (no Range support)
+    const req = protocol.request(url, {
+      timeout: 4 * 60 * 60 * 1000
+    }, (res) => {
+      let data = Buffer.alloc(0);
+      
+      res.on('data', chunk => {
+        data = Buffer.concat([data, chunk]);
+        downloadedBytes += chunk.length;
+      });
+      
+      res.on('end', () => {
+        chunks[0] = data;
+        streamChunksInOrder();
+        checkIfComplete(1);
+      });
+    });
+    
+    req.on('error', err => {
+      console.error(`❌ Fallback download failed: ${err.message}`);
+      stream.destroy(err);
     });
     
     req.end();
@@ -830,11 +876,32 @@ function createParallelRangeStream(url, fileSize, protocol) {
   
   function streamChunksInOrder() {
     while (chunks[nextChunkToStream] !== null && chunks[nextChunkToStream] !== undefined) {
-      stream.push(chunks[nextChunkToStream]);
+      const chunk = chunks[nextChunkToStream];
+      stream.push(chunk);
       delete chunks[nextChunkToStream];
       nextChunkToStream++;
     }
   }
+  
+  function checkIfComplete(totalChunks) {
+    // Check if all chunks downloaded
+    let allDownloaded = true;
+    for (let i = 0; i < totalChunks; i++) {
+      if (chunks[i] === undefined || chunks[i] === null) {
+        allDownloaded = false;
+        break;
+      }
+    }
+    
+    if (allDownloaded && !streamEnded) {
+      streamChunksInOrder();
+      streamEnded = true;
+      stream.push(null); // Signal end of stream
+    }
+  }
+  
+  // Kick off initial downloads
+  setImmediate(() => downloadChunksInParallel());
   
   return stream;
 }
