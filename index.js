@@ -640,8 +640,8 @@ async function sendToCoconut(downloadUrl, filename) {
 }
 
 /**
- * Stage video file - download from Filemail with parallel range requests
- * Uses 8 parallel connections to maximize throughput
+ * Stage video file - download from Filemail and stream directly to S3
+ * Uses streaming to avoid buffering entire file in memory
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
@@ -655,118 +655,77 @@ async function stageFileToS3(downloadUrl, filename) {
   try {
     const protocol = downloadUrl.startsWith('https') ? https : http;
     
-    // Get file size first
-    const fileSize = await new Promise((resolve) => {
-      const req = protocol.request(downloadUrl, { method: 'HEAD', timeout: 30000 }, (res) => {
-        resolve(parseInt(res.headers['content-length'] || '0', 10));
-      });
-      req.on('error', () => resolve(0));
-      req.end();
-    });
-    
-    console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
-    
-    if (fileSize === 0) {
-      throw new Error('Could not determine file size');
-    }
-    
-    // Download with 8 parallel range requests
-    const CHUNK_SIZE = 16 * 1024 * 1024; // 16MB per chunk
-    const NUM_PARALLEL = 8; // 8 parallel connections
-    let downloadedBytes = 0;
-    let lastLogTime = Date.now();
-    const chunks = new Map(); // byte position -> buffer
-    
+    // Create readable stream from Filemail
     return new Promise((resolve, reject) => {
-      // Function to download a range
-      async function downloadRange(start, end) {
-        return new Promise((resolve, reject) => {
-          const rangeHeader = `bytes=${start}-${end}`;
-          const req = protocol.request(downloadUrl, {
-            timeout: 2 * 60 * 60 * 1000,
-            headers: {
-              'Range': rangeHeader,
-              'User-Agent': 'Postready MediaConvert v1.0'
-            }
-          }, (res) => {
-            if (res.statusCode !== 206 && res.statusCode !== 200) {
-              return reject(new Error(`Range request failed: HTTP ${res.statusCode}`));
-            }
-            
-            let rangeData = Buffer.alloc(0);
-            res.on('data', (chunk) => {
-              rangeData = Buffer.concat([rangeData, chunk]);
-            });
-            res.on('end', () => {
-              chunks.set(start, rangeData);
-              downloadedBytes += rangeData.length;
-              
-              // Log progress every 10 seconds
-              const now = Date.now();
-              if (now - lastLogTime > 10000) {
-                const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
-                const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
-                const pct = ((downloadedBytes / fileSize) * 100).toFixed(1);
-                console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
-                lastLogTime = now;
-              }
-              
-              resolve();
-            });
-          });
-          req.on('error', reject);
-          req.end();
-        });
-      }
-      
-      // Queue all range requests
-      (async () => {
-        try {
-          const ranges = [];
-          for (let i = 0; i < fileSize; i += CHUNK_SIZE) {
-            const start = i;
-            const end = Math.min(i + CHUNK_SIZE - 1, fileSize - 1);
-            ranges.push({ start, end });
-          }
-          
-          // Download with parallelization
-          for (let i = 0; i < ranges.length; i += NUM_PARALLEL) {
-            const batch = ranges.slice(i, i + NUM_PARALLEL);
-            await Promise.all(batch.map(r => downloadRange(r.start, r.end)));
-          }
-          
-          // Combine chunks in order
-          const sortedPositions = Array.from(chunks.keys()).sort((a, b) => a - b);
-          let fileBuffer = Buffer.alloc(0);
-          for (const pos of sortedPositions) {
-            fileBuffer = Buffer.concat([fileBuffer, chunks.get(pos)]);
-          }
-          
-          console.log(`   ✅ Downloaded: ${(fileBuffer.length / 1024 / 1024 / 1024).toFixed(2)} GB in ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} min`);
-          
-          // Upload to S3
-          console.log(`   📤 Uploading to AWS S3...`);
-          const uploadStart = Date.now();
-          
-          await awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
-            .catch(() => {});
-          
-          await awsS3Client.send(new PutObjectCommand({
-            Bucket: "postready-staging",
-            Key: stagingKey,
-            Body: fileBuffer,
-            ContentType: "video/mxf"
-          }));
-          
-          console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
-          console.log(`   Upload time: ${((Date.now() - uploadStart) / 1000 / 60).toFixed(1)} minutes`);
-          console.log(`   Total time: ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} minutes`);
-          
-          resolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
-        } catch (err) {
-          reject(err);
+      const req = protocol.request(downloadUrl, {
+        timeout: 2 * 60 * 60 * 1000,
+        headers: {
+          'User-Agent': 'Postready MediaConvert v1.0'
         }
-      })();
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          return reject(new Error(`Download failed: HTTP ${res.statusCode}`));
+        }
+        
+        const fileSize = parseInt(res.headers['content-length'] || '0', 10);
+        console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
+        
+        let downloadedBytes = 0;
+        let lastLogTime = Date.now();
+        
+        // Track download progress
+        res.on('data', (chunk) => {
+          downloadedBytes += chunk.length;
+          const now = Date.now();
+          if (now - lastLogTime > 10000) {
+            const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
+            const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
+            const pct = fileSize > 0 ? ((downloadedBytes / fileSize) * 100).toFixed(1) : '0';
+            console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
+            lastLogTime = now;
+          }
+        });
+        
+        // Upload stream directly to S3
+        (async () => {
+          try {
+            console.log(`   📤 Streaming to AWS S3...`);
+            const uploadStart = Date.now();
+            
+            await awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
+              .catch(() => {});
+            
+            // Use Upload helper for multipart upload with streaming
+            const upload = new Upload({
+              client: awsS3Client,
+              params: {
+                Bucket: "postready-staging",
+                Key: stagingKey,
+                Body: res,
+                ContentType: "video/mxf"
+              }
+            });
+            
+            await upload.done();
+            
+            console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
+            console.log(`   Upload time: ${((Date.now() - uploadStart) / 1000 / 60).toFixed(1)} minutes`);
+            console.log(`   Total time: ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} minutes`);
+            
+            resolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
+          } catch (err) {
+            console.error(`❌ S3 upload failed: ${err.message}`);
+            reject(err);
+          }
+        })();
+      });
+      
+      req.on('error', reject);
+      req.setTimeout(2 * 60 * 60 * 1000, () => {
+        req.abort();
+        reject(new Error('Download timeout'));
+      });
+      req.end();
     });
   } catch (err) {
     console.error(`❌ S3 staging error: ${err.message}`);
