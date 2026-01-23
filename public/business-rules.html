@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Business Rules & Scheduling</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            font-size: 14px;
+            opacity: 0.95;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .rule-section {
+            margin-bottom: 30px;
+        }
+
+        .rule-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .rule-title {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+            font-size: 20px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .rule-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin-right: 15px;
+            font-size: 20px;
+        }
+
+        .icon-schedule {
+            background: #e3f2fd;
+            color: #1976d2;
+        }
+
+        .icon-urgent {
+            background: #fff3e0;
+            color: #f57c00;
+        }
+
+        .rule-description {
+            color: #666;
+            line-height: 1.6;
+            margin-left: 55px;
+            margin-bottom: 12px;
+        }
+
+        .rule-details {
+            background: #f5f5f5;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            border-radius: 4px;
+            margin-left: 55px;
+            font-size: 14px;
+            color: #555;
+            line-height: 1.6;
+        }
+
+        .urgent-highlight {
+            background: #fff3e0;
+            border-left-color: #f57c00;
+        }
+
+        .fee-breakdown {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 12px;
+            font-size: 13px;
+        }
+
+        .fee-item {
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+        }
+
+        .fee-label {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 4px;
+        }
+
+        .fee-value {
+            color: #f57c00;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .divider {
+            height: 1px;
+            background: #e0e0e0;
+            margin: 30px 0;
+        }
+
+        .footer {
+            background: #f9f9f9;
+            padding: 20px 40px;
+            text-align: center;
+            font-size: 13px;
+            color: #999;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .badge {
+            display: inline-block;
+            background: #e8f5e9;
+            color: #2e7d32;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+
+        .badge.urgent {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        @media (max-width: 600px) {
+            .header {
+                padding: 30px 20px;
+            }
+
+            .header h1 {
+                font-size: 24px;
+            }
+
+            .content {
+                padding: 20px;
+            }
+
+            .fee-breakdown {
+                grid-template-columns: 1fr;
+            }
+
+            .rule-title {
+                font-size: 18px;
+            }
+
+            .footer {
+                padding: 15px 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Business Rules & Scheduling</h1>
+            <p>Professional scheduling guidelines and availability options</p>
+        </div>
+
+        <div class="content">
+            <!-- Rule 1: Standard Scheduling -->
+            <div class="rule-section">
+                <div class="rule-title">
+                    <div class="rule-icon icon-schedule">📅</div>
+                    <span>Standard Scheduling</span>
+                    <span class="badge">Recommended</span>
+                </div>
+                <div class="rule-description">
+                    Schedule on time to avoid any delays and ensure smooth project execution.
+                </div>
+                <div class="rule-details">
+                    <strong>Key Guidelines:</strong><br>
+                    ✓ Book sessions according to availability calendar<br>
+                    ✓ Confirm scheduling 24 hours in advance<br>
+                    ✓ Allows optimal resource planning<br>
+                    ✓ Ensures professional delivery on schedule<br>
+                    ✓ Standard billing rates apply
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- Rule 2: Urgent/Stand-by Booking -->
+            <div class="rule-section">
+                <div class="rule-title">
+                    <div class="rule-icon icon-urgent">⚡</div>
+                    <span>Urgent / Stand-by Booking</span>
+                    <span class="badge urgent">Premium</span>
+                </div>
+                <div class="rule-description">
+                    For urgent requests, book stand-by time to ensure availability in case critical tasks pop up.
+                </div>
+                <div class="rule-details urgent-highlight">
+                    <strong>Stand-by Services:</strong><br>
+                    • Guarantees availability for urgent priority work<br>
+                    • Reserved capacity kept open for your needs<br>
+                    • Premium pricing reflects prioritized availability<br>
+                    • Perfect for time-sensitive or high-priority projects
+                    
+                    <div class="fee-breakdown">
+                        <div class="fee-item">
+                            <div class="fee-label">Standard Rate</div>
+                            <div class="fee-value">100%</div>
+                        </div>
+                        <div class="fee-item">
+                            <div class="fee-label">Stand-by Fee</div>
+                            <div class="fee-value">+25%</div>
+                        </div>
+                        <div class="fee-item">
+                            <div class="fee-label">Example (Hourly)</div>
+                            <div class="fee-value">$125/hr</div>
+                        </div>
+                        <div class="fee-item">
+                            <div class="fee-label">Breakdown</div>
+                            <div class="fee-value">$100 + $25 fee</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="divider"></div>
+
+            <!-- Summary -->
+            <div class="rule-section" style="margin-bottom: 0;">
+                <div style="background: #f0f4ff; padding: 20px; border-radius: 8px; border-left: 4px solid #667eea;">
+                    <strong style="color: #667eea; display: block; margin-bottom: 10px;">📋 How It Works:</strong>
+                    <ul style="color: #555; margin-left: 20px; line-height: 1.8; font-size: 14px;">
+                        <li><strong>Standard:</strong> Plan ahead and book regular slots at normal rates</li>
+                        <li><strong>Stand-by:</strong> Reserve my availability at 125% of hourly rate for urgent flexibility</li>
+                        <li><strong>Both Options:</strong> Deliver professional results with guaranteed commitment</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>For booking inquiries or questions about stand-by availability, please contact directly. Last updated: January 23, 2026</p>
+        </div>
+    </div>
+</body>
+</html>

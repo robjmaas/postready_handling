@@ -711,20 +711,44 @@ async function stageFileToS3(downloadUrl, filename) {
               const uploadPart = currentPart;
               currentPart = Buffer.alloc(0);
               
-              const partRes = await awsS3Client.send(new UploadPartCommand({
-                Bucket: "postready-staging",
-                Key: stagingKey,
-                PartNumber: partNumber,
-                UploadId: uploadId,
-                Body: uploadPart
-              }));
+              let partAttempts = 0;
+              let partErr = null;
               
-              parts.push({
-                ETag: partRes.ETag,
-                PartNumber: partNumber
-              });
+              while (partAttempts < 3) {
+                try {
+                  const partRes = await awsS3Client.send(new UploadPartCommand({
+                    Bucket: "postready-staging",
+                    Key: stagingKey,
+                    PartNumber: partNumber,
+                    UploadId: uploadId,
+                    Body: uploadPart
+                  }));
+                  
+                  if (!partRes.ETag) {
+                    throw new Error(`No ETag returned for part ${partNumber}`);
+                  }
+                  
+                  parts.push({
+                    ETag: partRes.ETag,
+                    PartNumber: partNumber
+                  });
+                  
+                  partErr = null;
+                  partNumber++;
+                  break; // Success
+                } catch (err) {
+                  partAttempts++;
+                  partErr = err;
+                  if (partAttempts < 3) {
+                    console.warn(`   ⚠️  Part ${partNumber} upload failed, retrying...`);
+                    await new Promise(r => setTimeout(r, 2000));
+                  }
+                }
+              }
               
-              partNumber++;
+              if (partErr) {
+                throw partErr;
+              }
             }
           } catch (err) {
             console.error(`❌ Part upload failed: ${err.message}`);
@@ -736,30 +760,89 @@ async function stageFileToS3(downloadUrl, filename) {
           try {
             // Upload final part if there's remaining data
             if (currentPart.length > 0) {
-              const partRes = await awsS3Client.send(new UploadPartCommand({
-                Bucket: "postready-staging",
-                Key: stagingKey,
-                PartNumber: partNumber,
-                UploadId: uploadId,
-                Body: currentPart
-              }));
+              let finalPartAttempts = 0;
+              let finalPartErr = null;
               
-              parts.push({
-                ETag: partRes.ETag,
-                PartNumber: partNumber
-              });
+              while (finalPartAttempts < 3) {
+                try {
+                  const partRes = await awsS3Client.send(new UploadPartCommand({
+                    Bucket: "postready-staging",
+                    Key: stagingKey,
+                    PartNumber: partNumber,
+                    UploadId: uploadId,
+                    Body: currentPart
+                  }));
+                  
+                  if (!partRes.ETag) {
+                    throw new Error(`No ETag returned for final part ${partNumber}`);
+                  }
+                  
+                  parts.push({
+                    ETag: partRes.ETag,
+                    PartNumber: partNumber
+                  });
+                  
+                  finalPartErr = null;
+                  break; // Success
+                } catch (err) {
+                  finalPartAttempts++;
+                  finalPartErr = err;
+                  if (finalPartAttempts < 3) {
+                    console.warn(`   ⚠️  Final part upload failed, retrying...`);
+                    await new Promise(r => setTimeout(r, 2000));
+                  }
+                }
+              }
+              
+              if (finalPartErr) {
+                throw finalPartErr;
+              }
             }
             
             console.log(`   ✅ Downloaded: ${(totalSize / 1024 / 1024 / 1024).toFixed(2)} GB in ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} min`);
             
-            // Complete multipart upload
-            console.log(`   📤 Completing S3 upload...`);
-            await awsS3Client.send(new CompleteMultipartUploadCommand({
-              Bucket: "postready-staging",
-              Key: stagingKey,
-              UploadId: uploadId,
-              MultipartUpload: { Parts: parts }
-            }));
+            // Verify parts before completion
+            if (!parts || parts.length === 0) {
+              throw new Error('No parts uploaded - cannot complete multipart upload');
+            }
+            
+            // Sort parts by PartNumber and clean ETags
+            const sortedParts = parts
+              .sort((a, b) => a.PartNumber - b.PartNumber)
+              .map(p => ({
+                PartNumber: p.PartNumber,
+                ETag: p.ETag.replace(/"/g, '') // Remove quotes from ETag
+              }));
+            
+            console.log(`   📤 Completing S3 upload... (${sortedParts.length} parts)`);
+            
+            // Complete multipart upload with retry logic
+            let completionAttempts = 0;
+            let completeErr = null;
+            
+            while (completionAttempts < 3) {
+              try {
+                await awsS3Client.send(new CompleteMultipartUploadCommand({
+                  Bucket: "postready-staging",
+                  Key: stagingKey,
+                  UploadId: uploadId,
+                  MultipartUpload: { Parts: sortedParts }
+                }));
+                completeErr = null;
+                break; // Success
+              } catch (err) {
+                completionAttempts++;
+                completeErr = err;
+                if (completionAttempts < 3) {
+                  console.warn(`   ⚠️  Completion attempt ${completionAttempts} failed, retrying in 5s...`);
+                  await new Promise(r => setTimeout(r, 5000));
+                }
+              }
+            }
+            
+            if (completeErr) {
+              throw completeErr;
+            }
             
             console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
             console.log(`   Total time: ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} minutes`);
