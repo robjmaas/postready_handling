@@ -3928,6 +3928,8 @@ async function pollPendingMediaConvertJobs() {
         } else if (mcJob.Status === "ERROR" || mcJob.Status === "CANCELED") {
           console.error(`❌ MediaConvert job failed: ${job.id}`);
           const errorMsg = mcJob.ErrorMessage || mcJob.Status;
+          console.error(`   Error: ${errorMsg}`);
+          console.error(`   Messages: ${JSON.stringify(mcJob.Messages || [])}`);
           await updateCoconutJob(job.id, "failed", null, errorMsg);
 
           // Clean up S3 staging on error
