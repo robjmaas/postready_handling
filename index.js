@@ -10,7 +10,7 @@ import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
 import { Readable } from "stream";
-import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, CreateBucketCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, CreateBucketCommand, ListObjectsV2Command, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
 import { MediaConvertClient, CreateJobCommand, GetJobCommand, CreateJobTemplateCommand, DeleteJobTemplateCommand, ListJobTemplatesCommand, GetJobTemplateCommand } from "@aws-sdk/client-mediaconvert";
@@ -640,8 +640,8 @@ async function sendToCoconut(downloadUrl, filename) {
 }
 
 /**
- * Stage video file - download from Filemail and upload to S3
- * Uses streaming to avoid buffering entire file in memory, but buffers in manageable chunks
+ * Stage video file - download from Filemail and upload to S3 with multipart upload
+ * Uploads parts as they arrive to avoid buffering entire file
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
@@ -655,12 +655,27 @@ async function stageFileToS3(downloadUrl, filename) {
   try {
     const protocol = downloadUrl.startsWith('https') ? https : http;
     
-    // Download with proper timeout and buffering in 5MB chunks
+    // Ensure bucket exists
+    await awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
+      .catch(() => {});
+    
+    // Start multipart upload BEFORE downloading
+    const multipartUpload = await awsS3Client.send(new CreateMultipartUploadCommand({
+      Bucket: "postready-staging",
+      Key: stagingKey,
+      ContentType: "video/mxf"
+    }));
+    
+    const uploadId = multipartUpload.UploadId;
+    const partSize = 5 * 1024 * 1024; // 5MB parts
+    const parts = [];
+    let partNumber = 1;
+    let currentPart = Buffer.alloc(0);
+    
     return new Promise((resolve, reject) => {
-      const chunks = [];
       let totalSize = 0;
-      let lastLogTime = Date.now();
       let fileSize = 0;
+      let lastLogTime = Date.now();
       
       const req = protocol.request(downloadUrl, {
         timeout: 2 * 60 * 60 * 1000,
@@ -675,60 +690,113 @@ async function stageFileToS3(downloadUrl, filename) {
         fileSize = parseInt(res.headers['content-length'] || '0', 10);
         console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
         
-        // Collect chunks
-        res.on('data', (chunk) => {
-          chunks.push(chunk);
-          totalSize += chunk.length;
-          
-          // Log progress every 10 seconds
-          const now = Date.now();
-          if (now - lastLogTime > 10000) {
-            const gbDownloaded = (totalSize / 1024 / 1024 / 1024).toFixed(2);
-            const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
-            const pct = fileSize > 0 ? ((totalSize / fileSize) * 100).toFixed(1) : '0';
-            console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
-            lastLogTime = now;
+        // Process data chunks and upload as parts
+        res.on('data', async (chunk) => {
+          try {
+            currentPart = Buffer.concat([currentPart, chunk]);
+            totalSize += chunk.length;
+            
+            // Log progress every 10 seconds
+            const now = Date.now();
+            if (now - lastLogTime > 10000) {
+              const gbDownloaded = (totalSize / 1024 / 1024 / 1024).toFixed(2);
+              const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
+              const pct = fileSize > 0 ? ((totalSize / fileSize) * 100).toFixed(1) : '0';
+              console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
+              lastLogTime = now;
+            }
+            
+            // Upload part when it reaches target size
+            if (currentPart.length >= partSize) {
+              const uploadPart = currentPart;
+              currentPart = Buffer.alloc(0);
+              
+              const partRes = await awsS3Client.send(new UploadPartCommand({
+                Bucket: "postready-staging",
+                Key: stagingKey,
+                PartNumber: partNumber,
+                UploadId: uploadId,
+                Body: uploadPart
+              }));
+              
+              parts.push({
+                ETag: partRes.ETag,
+                PartNumber: partNumber
+              });
+              
+              partNumber++;
+            }
+          } catch (err) {
+            console.error(`❌ Part upload failed: ${err.message}`);
+            reject(err);
           }
         });
         
         res.on('end', async () => {
           try {
-            // Combine all chunks into single buffer
-            const fileBuffer = Buffer.concat(chunks);
-            console.log(`   ✅ Downloaded: ${(fileBuffer.length / 1024 / 1024 / 1024).toFixed(2)} GB in ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} min`);
-            
-            // Verify buffer is not empty
-            if (fileBuffer.length === 0) {
-              return reject(new Error('Downloaded file is empty'));
+            // Upload final part if there's remaining data
+            if (currentPart.length > 0) {
+              const partRes = await awsS3Client.send(new UploadPartCommand({
+                Bucket: "postready-staging",
+                Key: stagingKey,
+                PartNumber: partNumber,
+                UploadId: uploadId,
+                Body: currentPart
+              }));
+              
+              parts.push({
+                ETag: partRes.ETag,
+                PartNumber: partNumber
+              });
             }
             
-            // Upload complete buffer to S3
-            console.log(`   📤 Uploading to AWS S3...`);
-            const uploadStart = Date.now();
+            console.log(`   ✅ Downloaded: ${(totalSize / 1024 / 1024 / 1024).toFixed(2)} GB in ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} min`);
             
-            await awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
-              .catch(() => {});
-            
-            await awsS3Client.send(new PutObjectCommand({
+            // Complete multipart upload
+            console.log(`   📤 Completing S3 upload...`);
+            await awsS3Client.send(new CompleteMultipartUploadCommand({
               Bucket: "postready-staging",
               Key: stagingKey,
-              Body: fileBuffer,
-              ContentType: "video/mxf"
+              UploadId: uploadId,
+              MultipartUpload: { Parts: parts }
             }));
             
             console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
-            console.log(`   Upload time: ${((Date.now() - uploadStart) / 1000 / 60).toFixed(1)} minutes`);
             console.log(`   Total time: ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} minutes`);
             
             resolve({ s3Url: `s3://postready-staging/${stagingKey}`, stagingKey });
           } catch (err) {
+            // Abort multipart upload on error
+            try {
+              await awsS3Client.send(new AbortMultipartUploadCommand({
+                Bucket: "postready-staging",
+                Key: stagingKey,
+                UploadId: uploadId
+              }));
+            } catch (abortErr) {
+              console.warn(`Could not abort multipart upload: ${abortErr.message}`);
+            }
+            
             console.error(`❌ S3 upload failed: ${err.message}`);
             reject(err);
           }
         });
       });
       
-      req.on('error', reject);
+      req.on('error', async (err) => {
+        // Abort multipart upload on error
+        try {
+          await awsS3Client.send(new AbortMultipartUploadCommand({
+            Bucket: "postready-staging",
+            Key: stagingKey,
+            UploadId: uploadId
+          }));
+        } catch (abortErr) {
+          console.warn(`Could not abort multipart upload: ${abortErr.message}`);
+        }
+        reject(err);
+      });
+      
       req.setTimeout(2 * 60 * 60 * 1000, () => {
         req.abort();
         reject(new Error('Download timeout'));
