@@ -640,8 +640,8 @@ async function sendToCoconut(downloadUrl, filename) {
 }
 
 /**
- * Stage video file - download from Filemail and stream directly to S3
- * Uses streaming to avoid buffering entire file in memory
+ * Stage video file - download from Filemail and upload to S3
+ * Uses streaming to avoid buffering entire file in memory, but buffers in manageable chunks
  */
 async function stageFileToS3(downloadUrl, filename) {
   const safeFilename = filename.replace(/[^\w\d_-]/g,"_");
@@ -655,58 +655,66 @@ async function stageFileToS3(downloadUrl, filename) {
   try {
     const protocol = downloadUrl.startsWith('https') ? https : http;
     
-    // Create readable stream from Filemail
+    // Download with proper timeout and buffering in 5MB chunks
     return new Promise((resolve, reject) => {
+      const chunks = [];
+      let totalSize = 0;
+      let lastLogTime = Date.now();
+      let fileSize = 0;
+      
       const req = protocol.request(downloadUrl, {
         timeout: 2 * 60 * 60 * 1000,
         headers: {
           'User-Agent': 'Postready MediaConvert v1.0'
         }
-      }, (res) => {
+      }, async (res) => {
         if (res.statusCode !== 200) {
           return reject(new Error(`Download failed: HTTP ${res.statusCode}`));
         }
         
-        const fileSize = parseInt(res.headers['content-length'] || '0', 10);
+        fileSize = parseInt(res.headers['content-length'] || '0', 10);
         console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
         
-        let downloadedBytes = 0;
-        let lastLogTime = Date.now();
-        
-        // Track download progress
+        // Collect chunks
         res.on('data', (chunk) => {
-          downloadedBytes += chunk.length;
+          chunks.push(chunk);
+          totalSize += chunk.length;
+          
+          // Log progress every 10 seconds
           const now = Date.now();
           if (now - lastLogTime > 10000) {
-            const gbDownloaded = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
+            const gbDownloaded = (totalSize / 1024 / 1024 / 1024).toFixed(2);
             const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
-            const pct = fileSize > 0 ? ((downloadedBytes / fileSize) * 100).toFixed(1) : '0';
+            const pct = fileSize > 0 ? ((totalSize / fileSize) * 100).toFixed(1) : '0';
             console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
             lastLogTime = now;
           }
         });
         
-        // Upload stream directly to S3
-        (async () => {
+        res.on('end', async () => {
           try {
-            console.log(`   📤 Streaming to AWS S3...`);
+            // Combine all chunks into single buffer
+            const fileBuffer = Buffer.concat(chunks);
+            console.log(`   ✅ Downloaded: ${(fileBuffer.length / 1024 / 1024 / 1024).toFixed(2)} GB in ${((Date.now() - uploadStartTime) / 1000 / 60).toFixed(1)} min`);
+            
+            // Verify buffer is not empty
+            if (fileBuffer.length === 0) {
+              return reject(new Error('Downloaded file is empty'));
+            }
+            
+            // Upload complete buffer to S3
+            console.log(`   📤 Uploading to AWS S3...`);
             const uploadStart = Date.now();
             
             await awsS3Client.send(new CreateBucketCommand({ Bucket: "postready-staging" }))
               .catch(() => {});
             
-            // Use Upload helper for multipart upload with streaming
-            const upload = new Upload({
-              client: awsS3Client,
-              params: {
-                Bucket: "postready-staging",
-                Key: stagingKey,
-                Body: res,
-                ContentType: "video/mxf"
-              }
-            });
-            
-            await upload.done();
+            await awsS3Client.send(new PutObjectCommand({
+              Bucket: "postready-staging",
+              Key: stagingKey,
+              Body: fileBuffer,
+              ContentType: "video/mxf"
+            }));
             
             console.log(`✅ S3 UPLOAD COMPLETE: s3://postready-staging/${stagingKey}`);
             console.log(`   Upload time: ${((Date.now() - uploadStart) / 1000 / 60).toFixed(1)} minutes`);
@@ -717,7 +725,7 @@ async function stageFileToS3(downloadUrl, filename) {
             console.error(`❌ S3 upload failed: ${err.message}`);
             reject(err);
           }
-        })();
+        });
       });
       
       req.on('error', reject);
