@@ -645,112 +645,154 @@ async function sendToCoconut(downloadUrl, filename) {
  * Falls back to single connection if Range requests not supported
  */
 async function downloadWithParallelRanges(downloadUrl, timeout = 2 * 60 * 60 * 1000) {
-  const protocol = downloadUrl.startsWith('https') ? https : http;
-  const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB (Filemail recommended)
-  const MAX_PARALLEL = 4; // Filemail supports up to 4 parallel per file
-  
-  // Get file size
-  const fileSize = await new Promise((resolve) => {
-    const req = protocol.request(downloadUrl, { method: 'HEAD', timeout }, (res) => {
-      resolve(parseInt(res.headers['content-length'] || '0', 10));
+  try {
+    const protocol = downloadUrl.startsWith('https') ? https : http;
+    const CHUNK_SIZE = 50 * 1024 * 1024; // 50MB (Filemail recommended)
+    const MAX_PARALLEL = 4; // Filemail supports up to 4 parallel per file
+    
+    // Get file size with timeout
+    const fileSize = await new Promise((resolve) => {
+      const req = protocol.request(downloadUrl, { method: 'HEAD', timeout: 30000 }, (res) => {
+        const size = parseInt(res.headers['content-length'] || '0', 10);
+        resolve(size);
+      });
+      req.on('error', () => resolve(0));
+      req.setTimeout(30000, () => {
+        req.destroy();
+        resolve(0);
+      });
+      req.end();
     });
-    req.on('error', () => resolve(0));
-    req.end();
-  });
-  
-  if (fileSize === 0 || fileSize < CHUNK_SIZE * 2) {
-    // File too small or size unknown - use single connection
-    return null;
-  }
-  
-  console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
-  console.log(`   📦 Attempting parallel download: ${Math.ceil(fileSize / CHUNK_SIZE)} × 50MB chunks`);
-  
-  const chunks = new Map();
-  let downloadedBytes = 0;
-  let lastLogTime = Date.now();
-  
-  // Test Range support with first chunk
-  const testReq = protocol.request(downloadUrl, {
-    headers: { 'Range': 'bytes=0-' + (CHUNK_SIZE - 1) },
-    timeout
-  }, (res) => {
-    // If we don't get 206, server doesn't support Range
-    if (res.statusCode !== 206) {
+    
+    if (fileSize === 0 || fileSize < CHUNK_SIZE * 2) {
+      // File too small or size unknown - use single connection
       return null;
     }
-  });
-  testReq.on('error', () => null);
-  testReq.end();
-  
-  // Download all chunks in parallel
-  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-  const downloadPromises = [];
-  
-  for (let i = 0; i < totalChunks; i += MAX_PARALLEL) {
-    const batchPromises = [];
     
-    for (let j = 0; j < MAX_PARALLEL && i + j < totalChunks; j++) {
-      const chunkIdx = i + j;
-      const start = chunkIdx * CHUNK_SIZE;
-      const end = Math.min(start + CHUNK_SIZE - 1, fileSize - 1);
-      
-      const promise = new Promise((resolve) => {
+    console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
+    console.log(`   📦 Attempting parallel download: ${Math.ceil(fileSize / CHUNK_SIZE)} × 50MB chunks`);
+    
+    const chunks = new Map();
+    let downloadedBytes = 0;
+    let lastLogTime = Date.now();
+    
+    // Test if server supports Range with quick HEAD test
+    let supportsRange = false;
+    try {
+      const testResult = await new Promise((resolve) => {
         const req = protocol.request(downloadUrl, {
-          headers: {
-            'Range': `bytes=${start}-${end}`,
-            'User-Agent': 'Postready/1.0'
-          },
-          timeout
+          method: 'HEAD',
+          headers: { 'Range': 'bytes=0-1' },
+          timeout: 10000
         }, (res) => {
-          if (res.statusCode !== 206 && res.statusCode !== 200) {
-            console.warn(`   ⚠️  Range ${chunkIdx} returned ${res.statusCode}`);
-            resolve(null);
-            return;
-          }
-          
-          let data = Buffer.alloc(0);
-          res.on('data', (chunk) => {
-            data = Buffer.concat([data, chunk]);
-          });
-          res.on('end', () => {
-            chunks.set(chunkIdx, data);
-            downloadedBytes += data.length;
-            
-            const now = Date.now();
-            if (now - lastLogTime > 30000) {
-              const gbDl = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
-              const mbps = ((downloadedBytes / (1024*1024)) / ((now - Date.now() + 30000) / 1000)).toFixed(1);
-              console.log(`   📥 Downloaded: ${gbDl} GB (~${mbps} Mbps, ${MAX_PARALLEL} parallel)`);
-              lastLogTime = now;
-            }
-            resolve(chunkIdx);
-          });
+          resolve(res.statusCode === 206);
         });
-        req.on('error', () => resolve(null));
+        req.on('error', () => resolve(false));
+        req.setTimeout(10000, () => {
+          req.destroy();
+          resolve(false);
+        });
         req.end();
       });
-      
-      batchPromises.push(promise);
+      supportsRange = testResult;
+    } catch (e) {
+      supportsRange = false;
     }
     
-    await Promise.all(batchPromises);
-  }
-  
-  // Assemble chunks in order
-  const assembled = Buffer.alloc(fileSize);
-  let offset = 0;
-  
-  for (let i = 0; i < totalChunks; i++) {
-    const chunk = chunks.get(i);
-    if (!chunk) return null; // Chunk missing, fallback to single connection
+    if (!supportsRange) {
+      console.log(`   ⚠️  Server doesn't support Range requests, using fallback`);
+      return null;
+    }
     
-    chunk.copy(assembled, offset);
-    offset += chunk.length;
+    // Download all chunks in parallel
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+    
+    for (let i = 0; i < totalChunks; i += MAX_PARALLEL) {
+      const batchPromises = [];
+      
+      for (let j = 0; j < MAX_PARALLEL && i + j < totalChunks; j++) {
+        const chunkIdx = i + j;
+        const start = chunkIdx * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE - 1, fileSize - 1);
+        
+        const promise = new Promise((resolve) => {
+          const req = protocol.request(downloadUrl, {
+            headers: {
+              'Range': `bytes=${start}-${end}`,
+              'User-Agent': 'Postready/1.0'
+            },
+            timeout: 60000
+          }, (res) => {
+            if (res.statusCode !== 206 && res.statusCode !== 200) {
+              console.warn(`   ⚠️  Chunk ${chunkIdx} returned ${res.statusCode}`);
+              resolve(null);
+              return;
+            }
+            
+            let data = Buffer.alloc(0);
+            res.on('data', (chunk) => {
+              try {
+                data = Buffer.concat([data, chunk]);
+              } catch (e) {
+                console.warn(`   ⚠️  Chunk ${chunkIdx} concat error: ${e.message}`);
+              }
+            });
+            res.on('end', () => {
+              chunks.set(chunkIdx, data);
+              downloadedBytes += data.length;
+              
+              const now = Date.now();
+              if (now - lastLogTime > 30000) {
+                const gbDl = (downloadedBytes / 1024 / 1024 / 1024).toFixed(2);
+                const elapsed = (now - Date.now() + 30000) / 1000;
+                const mbps = elapsed > 0 ? ((downloadedBytes / (1024*1024)) / elapsed).toFixed(1) : '?';
+                console.log(`   📥 Parallel: ${gbDl} GB (~${mbps} Mbps, ${MAX_PARALLEL} chunks)`);
+                lastLogTime = now;
+              }
+              resolve(chunkIdx);
+            });
+          });
+          
+          req.on('error', (err) => {
+            console.warn(`   ⚠️  Chunk ${chunkIdx} error: ${err.message}`);
+            resolve(null);
+          });
+          
+          req.setTimeout(60000, () => {
+            req.destroy();
+            resolve(null);
+          });
+          
+          req.end();
+        });
+        
+        batchPromises.push(promise);
+      }
+      
+      await Promise.all(batchPromises);
+    }
+    
+    // Assemble chunks in order
+    const assembled = Buffer.alloc(fileSize);
+    let offset = 0;
+    
+    for (let i = 0; i < totalChunks; i++) {
+      const chunk = chunks.get(i);
+      if (!chunk) {
+        console.warn(`   ⚠️  Missing chunk ${i}, falling back to single connection`);
+        return null;
+      }
+      
+      chunk.copy(assembled, offset);
+      offset += chunk.length;
+    }
+    
+    console.log(`   ✅ Parallel download complete: ${(assembled.length / 1024 / 1024 / 1024).toFixed(2)} GB`);
+    return assembled;
+  } catch (err) {
+    console.warn(`   ⚠️  Parallel download failed: ${err.message}, using fallback`);
+    return null;
   }
-  
-  console.log(`   ✅ Parallel download complete: ${(assembled.length / 1024 / 1024 / 1024).toFixed(2)} GB`);
-  return assembled;
 }
 
 /**
