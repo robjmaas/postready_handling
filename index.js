@@ -714,6 +714,8 @@ async function stageFileToS3(downloadUrl, filename) {
       let totalSize = 0;
       let fileSize = 0;
       let lastLogTime = Date.now();
+      let isProcessing = false;
+      let hasError = false;
       
       const req = protocol.request(downloadUrl, {
         timeout: 2 * 60 * 60 * 1000,
@@ -726,76 +728,131 @@ async function stageFileToS3(downloadUrl, filename) {
         }
         
         fileSize = parseInt(res.headers['content-length'] || '0', 10);
+        
+        // Monitor memory usage during large file uploads
+        const memoryMonitorInterval = setInterval(() => {
+          const mem = process.memoryUsage();
+          const heapUsedGb = (mem.heapUsed / 1024 / 1024 / 1024).toFixed(2);
+          const heapTotalGb = (mem.heapTotal / 1024 / 1024 / 1024).toFixed(2);
+          const externalMb = (mem.external / 1024 / 1024).toFixed(1);
+          console.log(`   💾 Memory: heap ${heapUsedGb}GB / ${heapTotalGb}GB, external ${externalMb}MB, queue size: ${chunks.length}`);
+        }, 30000); // Log every 30 seconds
+        
+        // Clean up memory monitor on response end
+        res.on('close', () => clearInterval(memoryMonitorInterval));
         console.log(`   📊 File size: ${(fileSize / 1024 / 1024 / 1024).toFixed(2)} GB`);
         
-        // Process data chunks and upload as parts
-        res.on('data', async (chunk) => {
-          try {
-            currentPart = Buffer.concat([currentPart, chunk]);
-            totalSize += chunk.length;
-            
-            // Log progress every 10 seconds
-            const now = Date.now();
-            if (now - lastLogTime > 10000) {
-              const gbDownloaded = (totalSize / 1024 / 1024 / 1024).toFixed(2);
-              const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
-              const pct = fileSize > 0 ? ((totalSize / fileSize) * 100).toFixed(1) : '0';
-              console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
-              lastLogTime = now;
-            }
-            
-            // Upload part when it reaches target size
-            if (currentPart.length >= partSize) {
-              const uploadPart = currentPart;
-              currentPart = Buffer.alloc(0);
-              
-              let partAttempts = 0;
-              let partErr = null;
-              
-              while (partAttempts < 3) {
-                try {
-                  const partRes = await awsS3Client.send(new UploadPartCommand({
-                    Bucket: "postready-staging",
-                    Key: stagingKey,
-                    PartNumber: partNumber,
-                    UploadId: uploadId,
-                    Body: uploadPart
-                  }));
-                  
-                  if (!partRes.ETag) {
-                    throw new Error(`No ETag returned for part ${partNumber}`);
-                  }
-                  
-                  parts.push({
-                    ETag: partRes.ETag,
-                    PartNumber: partNumber
-                  });
-                  
-                  partErr = null;
-                  partNumber++;
-                  break; // Success
-                } catch (err) {
-                  partAttempts++;
-                  partErr = err;
-                  if (partAttempts < 3) {
-                    console.warn(`   ⚠️  Part ${partNumber} upload failed, retrying...`);
-                    await new Promise(r => setTimeout(r, 2000));
-                  }
-                }
-              }
-              
-              if (partErr) {
-                throw partErr;
-              }
-            }
-          } catch (err) {
-            console.error(`❌ Part upload failed: ${err.message}`);
-            reject(err);
+        // Queue-based approach to handle backpressure properly
+        const chunks = [];
+        let isReadable = true;
+        
+        // Handle backpressure: pause/resume stream based on queue size
+        res.on('data', (chunk) => {
+          if (hasError) return; // Stop processing if error occurred
+          
+          chunks.push(chunk);
+          
+          // Pause stream if queue gets too large (20 chunks = ~10MB with typical chunk size)
+          if (chunks.length > 20) {
+            res.pause();
+            isReadable = false;
+          }
+          
+          // Process chunks only once, asynchronously
+          if (!isProcessing) {
+            isProcessing = true;
+            processChunkQueue();
           }
         });
         
+        async function processChunkQueue() {
+          while (chunks.length > 0 && !hasError) {
+            try {
+              const chunk = chunks.shift();
+              currentPart = Buffer.concat([currentPart, chunk]);
+              totalSize += chunk.length;
+              
+              // Log progress every 10 seconds
+              const now = Date.now();
+              if (now - lastLogTime > 10000) {
+                const gbDownloaded = (totalSize / 1024 / 1024 / 1024).toFixed(2);
+                const gbTotal = (fileSize / 1024 / 1024 / 1024).toFixed(2);
+                const pct = fileSize > 0 ? ((totalSize / fileSize) * 100).toFixed(1) : '0';
+                console.log(`   📥 Download progress: ${gbDownloaded}GB / ${gbTotal}GB (${pct}%)`);
+                lastLogTime = now;
+              }
+              
+              // Upload part when it reaches target size
+              if (currentPart.length >= partSize) {
+                const uploadPart = currentPart;
+                currentPart = Buffer.alloc(0);
+                
+                let partAttempts = 0;
+                let partErr = null;
+                
+                while (partAttempts < 3) {
+                  try {
+                    const partRes = await awsS3Client.send(new UploadPartCommand({
+                      Bucket: "postready-staging",
+                      Key: stagingKey,
+                      PartNumber: partNumber,
+                      UploadId: uploadId,
+                      Body: uploadPart
+                    }));
+                    
+                    if (!partRes.ETag) {
+                      throw new Error(`No ETag returned for part ${partNumber}`);
+                    }
+                    
+                    parts.push({
+                      ETag: partRes.ETag,
+                      PartNumber: partNumber
+                    });
+                    
+                    partErr = null;
+                    partNumber++;
+                    break; // Success
+                  } catch (err) {
+                    partAttempts++;
+                    partErr = err;
+                    if (partAttempts < 3) {
+                      console.warn(`   ⚠️  Part ${partNumber} upload failed, retrying...`);
+                      await new Promise(r => setTimeout(r, 2000));
+                    }
+                  }
+                }
+                
+                if (partErr) {
+                  throw partErr;
+                }
+              }
+              
+              // Resume stream if queue is small enough
+              if (!isReadable && chunks.length < 5) {
+                res.resume();
+                isReadable = true;
+              }
+            } catch (err) {
+              hasError = true;
+              console.error(`❌ Part upload failed: ${err.message}`);
+              reject(err);
+              return;
+            }
+          }
+          
+          isProcessing = false;
+        }
+        
         res.on('end', async () => {
           try {
+            // Wait for any remaining chunks in queue to be processed
+            if (chunks.length > 0 || isProcessing) {
+              console.log(`   ⏳ Waiting for chunk queue to drain... (${chunks.length} chunks, processing: ${isProcessing})`);
+              while (chunks.length > 0 || isProcessing) {
+                await new Promise(r => setTimeout(r, 100));
+              }
+            }
+            
             // Upload final part if there's remaining data
             if (currentPart.length > 0) {
               let finalPartAttempts = 0;
