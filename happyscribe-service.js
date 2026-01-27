@@ -30,6 +30,59 @@ export function isHappyScribeConfigured() {
 }
 
 /**
+ * Convert S3 URL to presigned HTTPS URL
+ * @param {string} s3Url - S3 URL (s3://bucket/key)
+ * @returns {Promise<string>} - Presigned HTTPS URL
+ */
+async function convertS3UrlToPresigned(s3Url) {
+  try {
+    // Only process S3 URLs
+    if (!s3Url.startsWith('s3://')) {
+      return s3Url;
+    }
+
+    console.log(`   Converting S3 URL to presigned HTTPS...`);
+
+    // Parse S3 URL
+    const urlParts = s3Url.replace('s3://', '').split('/');
+    const bucket = urlParts[0];
+    const key = urlParts.slice(1).join('/');
+
+    // Import AWS S3 client and presigner from main app context
+    // We need to use the same S3 client configured in index.js
+    const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+    const { getSignedUrl } = await import('@aws-sdk/s3-request-presigner');
+    const { S3Client } = await import('@aws-sdk/client-s3');
+
+    // Create S3 client with same config as main app
+    const s3Client = new S3Client({
+      region: process.env.AWS_REGION || 'us-west-2',
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+      }
+    });
+
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: key
+    });
+
+    // Generate presigned URL valid for 24 hours
+    const presignedUrl = await getSignedUrl(s3Client, command, { expiresIn: 86400 });
+
+    console.log(`   ✅ Presigned URL generated (24 hour expiration)`);
+    console.log(`   URL pattern: https://${bucket}.s3.${process.env.AWS_REGION || 'us-west-2'}.amazonaws.com/...`);
+
+    return presignedUrl;
+  } catch (err) {
+    console.warn(`⚠️  Failed to generate presigned URL: ${err.message}`);
+    console.warn(`   Will attempt to use original URL (may fail if not publicly accessible)`);
+    return s3Url;
+  }
+}
+
+/**
  * Create a transcription order
  * @param {string} mediaFileUrl - S3 or Filemail URL (must be publicly accessible)
  * @param {string} filename - Original filename
@@ -53,14 +106,18 @@ export async function createTranscriptionOrder(mediaFileUrl, filename, options =
     console.log(`📝 HAPPY SCRIBE TRANSCRIPTION ORDER`);
     console.log(`${'='.repeat(60)}`);
     console.log(`File: ${filename}`);
-    console.log(`URL: ${mediaFileUrl.substring(0, 80)}...`);
+    console.log(`Original URL: ${mediaFileUrl.substring(0, 80)}...`);
     console.log(`Service: ${service}`);
     console.log(`Language: ${language}`);
+
+    // Convert S3 URLs to presigned HTTPS URLs
+    const apiUrl = await convertS3UrlToPresigned(mediaFileUrl);
+    console.log(`API URL: ${apiUrl.substring(0, 80)}...`);
 
     // Create order via Orders API (newer, preferred)
     const orderPayload = {
       order: {
-        url: mediaFileUrl,
+        url: apiUrl,
         language: language,
         service: service,
         confirm: true,
