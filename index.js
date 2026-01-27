@@ -2486,11 +2486,16 @@ async function uploadSRTToFrameIO(srtContent, filename, transferId) {
     const projectData = await projectRes.json();
     const rootAssetId = projectData.root_asset_id;
     
+    console.log(`   Step 2: Root asset ID: ${rootAssetId}`);
+    console.log(`   Project data keys: ${Object.keys(projectData).join(', ')}`);
+    
     // Step 1.5: If transfer ID provided, ensure folder exists
     let parentAssetId = rootAssetId;
     if (transferId) {
       parentAssetId = await ensureTransferFolder(rootAssetId, transferId);
     }
+    
+    console.log(`   Step 3: Parent asset ID: ${parentAssetId}`);
     
     // Step 2: Create asset in target folder
     const srtFilename = `${filename}.srt`;
