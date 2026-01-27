@@ -294,10 +294,97 @@ export async function downloadTranscripts(orderId, formats = HAPPYSCRIBE_EXPORT_
 }
 
 /**
- * Create translation order
+ * Download SRT file content from Happy Scribe
+ * @param {string} orderId - Happy Scribe order ID
+ * @returns {Promise<string>} - SRT file content
  */
-export async function createTranslationOrder(sourceTranscriptionId, targetLanguages, options = {}) {
+export async function downloadSRT(orderId) {
   try {
+    const status = await getTranscriptionOrderStatus(orderId);
+
+    if (status.state !== 'fulfilled') {
+      throw new Error(`Transcription not ready (state: ${status.state})`);
+    }
+
+    const transcriptionIds = status.transcriptions.map(t => t.uuid);
+
+    if (!transcriptionIds.length) {
+      throw new Error('No transcriptions found in order');
+    }
+
+    const transcriptionId = transcriptionIds[0];
+
+    console.log(`\n📥 Downloading SRT for order: ${orderId}`);
+
+    const exportPayload = {
+      export: {
+        format: 'srt',
+        transcription_ids: [transcriptionId],
+        show_timestamps: true,
+        show_speakers: true
+      }
+    };
+
+    const exportResponse = await fetch(`${HS_API_BASE}/exports`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${HAPPYSCRIBE_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(exportPayload)
+    });
+
+    if (!exportResponse.ok) {
+      throw new Error(`Failed to create SRT export: ${exportResponse.status}`);
+    }
+
+    const exportData = await exportResponse.json();
+    const exportId = exportData.id;
+
+    // Poll for export completion
+    let exportStatus = null;
+    for (let i = 0; i < 30; i++) {
+      const statusResponse = await fetch(`${HS_API_BASE}/exports/${exportId}`, {
+        headers: {
+          'Authorization': `Bearer ${HAPPYSCRIBE_API_KEY}`
+        }
+      });
+
+      if (!statusResponse.ok) {
+        throw new Error(`Failed to get export status: ${statusResponse.status}`);
+      }
+
+      exportStatus = await statusResponse.json();
+
+      if (exportStatus.state === 'ready') {
+        console.log(`✅ SRT ready, downloading...`);
+        
+        // Download the SRT file
+        const srtResponse = await fetch(exportStatus.download_link);
+        if (!srtResponse.ok) {
+          throw new Error(`Failed to download SRT: ${srtResponse.status}`);
+        }
+        
+        const srtContent = await srtResponse.text();
+        console.log(`✅ SRT downloaded: ${srtContent.length} bytes`);
+        
+        return srtContent;
+      }
+
+      if (exportStatus.state === 'failed') {
+        throw new Error(`SRT export failed`);
+      }
+
+      // Wait before polling again
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    throw new Error('SRT export timed out');
+  } catch (err) {
+    console.error(`Error downloading SRT: ${err.message}`);
+    throw err;
+  }
+}
     if (!isHappyScribeConfigured()) {
       throw new Error('Happy Scribe not configured');
     }
@@ -438,6 +525,7 @@ export default {
   getTranscriptionOrderStatus,
   waitForTranscriptionCompletion,
   downloadTranscripts,
+  downloadSRT,
   createTranslationOrder,
   getTranslationOrderStatus,
   verifyHappyScribeWebhookSignature,

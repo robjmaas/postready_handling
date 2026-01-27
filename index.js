@@ -283,6 +283,16 @@ async function initDb() {
     }
   }
 
+  // Add srt_uploaded_to_frameio column if it doesn't exist
+  try {
+    await db.exec("ALTER TABLE happy_scribe_orders ADD COLUMN srt_uploaded_to_frameio BOOLEAN DEFAULT 0;");
+    console.log("✅ Added srt_uploaded_to_frameio column to happy_scribe_orders table");
+  } catch (err) {
+    if (!err.message.includes("duplicate column")) {
+      console.warn(`⚠️  Migration warning: ${err.message}`);
+    }
+  }
+
   // Initialize default settings
   await db.run(
     "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
@@ -2444,6 +2454,123 @@ async function uploadToFrameIO(videoUrl, filename, transferId = null) {
 }
 
 /**
+ * Upload Happy Scribe SRT to Frame.io as a subtitle asset
+ */
+async function uploadSRTToFrameIO(srtContent, filename, transferId) {
+  if (!FRAMEIO_TOKEN || !FRAMEIO_PROJECT_ID) {
+    console.warn("⚠️  Frame.io credentials not configured, skipping SRT upload");
+    return null;
+  }
+
+  try {
+    console.log(`📤 Uploading SRT to Frame.io`);
+    console.log(`   Filename: ${filename}.srt`);
+    console.log(`   Size: ${srtContent.length} bytes`);
+    
+    // Step 1: Fetch the project details to get root asset ID
+    const projectRes = await fetch(
+      `https://api.frame.io/v2/projects/${FRAMEIO_PROJECT_ID}`,
+      {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+
+    if (!projectRes.ok) {
+      throw new Error(`Failed to fetch project: ${projectRes.status}`);
+    }
+
+    const projectData = await projectRes.json();
+    const rootAssetId = projectData.root_asset_id;
+    
+    // Step 1.5: If transfer ID provided, ensure folder exists
+    let parentAssetId = rootAssetId;
+    if (transferId) {
+      parentAssetId = await ensureTransferFolder(rootAssetId, transferId);
+    }
+    
+    // Step 2: Create asset in target folder
+    const srtFilename = `${filename}.srt`;
+    const assetPayload = {
+      name: srtFilename,
+      type: "file"
+    };
+    
+    const createAssetRes = await fetch(
+      `https://api.frame.io/v2/assets/${parentAssetId}`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(assetPayload)
+      }
+    );
+
+    if (!createAssetRes.ok) {
+      throw new Error(`Failed to create SRT asset: ${createAssetRes.status}`);
+    }
+
+    const assetData = await createAssetRes.json();
+    const srtAssetId = assetData.id;
+    console.log(`✅ SRT asset created in Frame.io: ${srtAssetId}`);
+    
+    // Step 3: Get upload info for the SRT file
+    const uploadInfoRes = await fetch(
+      `https://api.frame.io/v2/assets/${srtAssetId}/upload_sessions`,
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          filesize: srtContent.length,
+          filename: srtFilename
+        })
+      }
+    );
+
+    if (!uploadInfoRes.ok) {
+      throw new Error(`Failed to get upload info: ${uploadInfoRes.status}`);
+    }
+
+    const uploadInfo = await uploadInfoRes.json();
+    const uploadUrl = uploadInfo.upload_link;
+    
+    console.log(`   Upload URL: ${uploadUrl.substring(0, 80)}...`);
+    
+    // Step 4: Upload the SRT content
+    const uploadRes = await fetch(uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "text/plain"
+      },
+      body: srtContent
+    });
+
+    if (!uploadRes.ok) {
+      throw new Error(`Failed to upload SRT: ${uploadRes.status}`);
+    }
+
+    console.log(`✅ SRT uploaded to Frame.io: ${srtAssetId}`);
+    
+    return {
+      id: srtAssetId,
+      filename: srtFilename,
+      size: srtContent.length
+    };
+  } catch (err) {
+    console.error(`❌ SRT upload error:`, err.message);
+    return null;
+  }
+}
+
+/**
  * Upload audio files for a transfer to Frame.io as separate assets
  */
 async function uploadAudioFilesForTransfer(transferId) {
@@ -3032,6 +3159,80 @@ app.get('/transcribe/order/:orderId', async (req, res) => {
     });
   } catch (err) {
     console.error('Get transcription status error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /transcribe/order/{orderId}/upload-srt-to-frameio
+ * Check if transcription is complete and upload SRT to Frame.io
+ */
+app.post('/transcribe/order/:orderId/upload-srt-to-frameio', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    // Get the transcription order from database
+    const order = await db.get(
+      "SELECT * FROM happy_scribe_orders WHERE order_id = ?",
+      [orderId]
+    );
+
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found in database' });
+    }
+
+    if (order.srt_uploaded_to_frameio) {
+      return res.json({
+        success: true,
+        message: 'SRT already uploaded to Frame.io',
+        orderId
+      });
+    }
+
+    // Check if transcription is complete
+    const status = await happyscribeService.getTranscriptionOrderStatus(orderId);
+
+    if (status.state !== 'fulfilled') {
+      return res.status(202).json({
+        success: false,
+        error: `Transcription not ready (state: ${status.state})`,
+        state: status.state,
+        progress: status.progress
+      });
+    }
+
+    // Download SRT from Happy Scribe
+    const srtContent = await happyscribeService.downloadSRT(orderId);
+
+    if (!srtContent) {
+      return res.status(500).json({ error: 'Failed to download SRT' });
+    }
+
+    // Upload SRT to Frame.io
+    const filename = order.source_url?.split('/').pop()?.replace(/\.\w+$/, '') || 'transcript';
+    const srtResult = await uploadSRTToFrameIO(srtContent, filename, order.transfer_id);
+
+    if (!srtResult) {
+      return res.status(500).json({ error: 'Failed to upload SRT to Frame.io' });
+    }
+
+    // Mark as uploaded in database
+    await db.run(
+      "UPDATE happy_scribe_orders SET srt_uploaded_to_frameio = 1 WHERE order_id = ?",
+      [orderId]
+    );
+
+    res.json({
+      success: true,
+      message: 'SRT uploaded to Frame.io',
+      orderId,
+      srtAssetId: srtResult.id,
+      srtFilename: srtResult.filename,
+      srtSize: srtResult.size,
+      transferId: order.transfer_id
+    });
+  } catch (err) {
+    console.error('Upload SRT to Frame.io error:', err);
     res.status(500).json({ error: err.message });
   }
 });
