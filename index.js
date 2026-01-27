@@ -3255,7 +3255,8 @@ This is the second subtitle.
 00:00:06,000 --> 00:00:10,000
 And this is the third one.`;
 
-    const srtResult = await uploadSRTToFrameIO(testSRT, 'test-video', 'jojrpvchsgijjku');
+    // Upload to root (no transfer folder)
+    const srtResult = await uploadSRTToFrameIO(testSRT, 'test-video', null);
 
     if (!srtResult) {
       return res.status(500).json({ error: 'Failed to upload test SRT' });
@@ -3263,10 +3264,11 @@ And this is the third one.`;
 
     res.json({
       success: true,
-      message: 'Test SRT uploaded successfully',
+      message: 'Test SRT uploaded successfully to Frame.io root',
       srtAssetId: srtResult.id,
       srtFilename: srtResult.filename,
-      srtSize: srtResult.size
+      srtSize: srtResult.size,
+      frameioUrl: `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}`
     });
   } catch (err) {
     console.error('Test SRT upload error:', err);
