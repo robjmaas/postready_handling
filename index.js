@@ -4648,6 +4648,76 @@ async function pollPendingMediaConvertJobs() {
                   uploadAudioFilesForTransfer(job.transfer_id)
                     .catch(err => console.warn(`Audio upload failed: ${err.message}`));
                 }
+                
+                // Auto-transcribe if language preference is set
+                if (job.transfer_id) {
+                  console.log(`🎙️ Auto-transcription: Starting setImmediate for transferId=${job.transfer_id}`);
+                  // Use setImmediate to avoid blocking polling loop
+                  setImmediate(async () => {
+                    console.log(`🎙️ Auto-transcription: Inside setImmediate callback for transferId=${job.transfer_id}`);
+                    try {
+                      // Query database for transcription language (async/await, not .then())
+                      console.log(`🎙️ Auto-transcription: Querying database for language...`);
+                      const transfer = await db.get(
+                        "SELECT transcription_language FROM processed_transfers WHERE id = ?",
+                        [job.transfer_id]
+                      );
+                      console.log(`🎙️ Auto-transcription: DB query result:`, transfer);
+                      
+                      if (transfer && transfer.transcription_language && transfer.transcription_language !== 'xx') {
+                        console.log(`🎙️  Auto-transcribing in ${transfer.transcription_language}...`);
+                        
+                        if (!happyscribeService.isHappyScribeConfigured()) {
+                          console.warn(`⚠️  Happy Scribe not configured, skipping auto-transcription`);
+                          return;
+                        }
+                        
+                        let mediaFileUrl = outputUrl;
+                        const outputKey = originalFilename.replace(/\.\w+$/, "");
+                        
+                        // Convert S3 URL to presigned HTTPS URL for Happy Scribe API
+                        if (mediaFileUrl.startsWith('s3://')) {
+                          try {
+                            const urlParts = mediaFileUrl.replace('s3://', '').split('/');
+                            const bucket = urlParts[0];
+                            const key = urlParts.slice(1).join('/');
+                            
+                            const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+                            const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+                            
+                            const awsS3Client = new S3Client({
+                              region: AWS_REGION,
+                              credentials: {
+                                accessKeyId: AWS_ACCESS_KEY_ID,
+                                secretAccessKey: AWS_SECRET_ACCESS_KEY
+                              }
+                            });
+                            
+                            const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
+                            mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+                            console.log(`   ✅ Presigned URL created for transcription`);
+                          } catch (urlErr) {
+                            console.error(`   ⚠️  Failed to create presigned URL: ${urlErr.message}`);
+                          }
+                        }
+                        
+                        const result = await happyscribeService.createTranscriptionOrder(
+                          mediaFileUrl,
+                          outputKey,
+                          { service: 'auto', language: transfer.transcription_language, transferId: job.transfer_id, jobId: job.id, sourceType: 'mediaconvert' }
+                        );
+                        
+                        console.log(`✅ Auto-transcription order created: ${result.orderId}`);
+                      } else {
+                        console.log(`🎙️ Auto-transcription: No language set or language is 'xx' (skip)`);
+                      }
+                    } catch (err) {
+                      console.error(`❌ Auto-transcription check failed: ${err.message}`);
+                    }
+                  });
+                } else {
+                  console.log(`🎙️ Auto-transcription: transferId not found, skipping`);
+                }
               })
               .catch((err) => {
                 console.error(`⚠️  Frame.io upload failed: ${err.message}`);
