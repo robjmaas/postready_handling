@@ -4008,6 +4008,10 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
         
         // Get transfer ID for audio upload
         const transferId = message.detail?.userMetadata?.transferId;
+        console.log(`🔍 Extracted transferId from webhook: ${transferId || 'NOT FOUND'}`);
+        console.log(`   UserMetadata: ${JSON.stringify(message.detail?.userMetadata || {})}`);
+        console.log(`   Full detail keys: ${Object.keys(message.detail || {}).join(', ')}`);
+        if (transferId) console.log(`✅ TransferId found: ${transferId}`);
         
         // Get signed URL for Frame.io (non-blocking)
         getSignedS3Url(outputKey)
@@ -4027,14 +4031,18 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
                 
                 // Auto-transcribe if language preference is set
                 if (transferId) {
+                  console.log(`🎙️ Auto-transcription: Starting setImmediate for transferId=${transferId}`);
                   // Use setImmediate to avoid blocking webhook response
                   setImmediate(async () => {
+                    console.log(`🎙️ Auto-transcription: Inside setImmediate callback for transferId=${transferId}`);
                     try {
                       // Query database for transcription language (async/await, not .then())
+                      console.log(`🎙️ Auto-transcription: Querying database for language...`);
                       const transfer = await db.get(
                         "SELECT transcription_language FROM processed_transfers WHERE id = ?",
                         [transferId]
                       );
+                      console.log(`🎙️ Auto-transcription: DB query result:`, transfer);
                       
                       if (transfer && transfer.transcription_language && transfer.transcription_language !== 'xx') {
                         console.log(`🎙️  Auto-transcribing in ${transfer.transcription_language}...`);
@@ -4068,11 +4076,15 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
                         );
                         
                         console.log(`✅ Auto-transcription order created: ${result.orderId}`);
+                      } else {
+                        console.log(`🎙️ Auto-transcription: No language set or language is 'xx' (skip)`);
                       }
                     } catch (err) {
                       console.error(`❌ Auto-transcription check failed: ${err.message}`);
                     }
                   });
+                } else {
+                  console.log(`🎙️ Auto-transcription: transferId not found, skipping`);
                 }
               })
               .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
@@ -4085,47 +4097,46 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
               uploadAudioFilesForTransfer(transferId)
                 .catch(err => console.warn(`Audio upload failed: ${err.message}`));
               
-            // Still try auto-transcription
-              setImmediate(async () => {
-                try {
-                  const transfer = await db.get(
-                    "SELECT transcription_language FROM processed_transfers WHERE id = ?",
-                    [transferId]
-                  );
-                  
+              // Still try auto-transcription
+              db.get("SELECT transcription_language FROM processed_transfers WHERE id = ?", [transferId])
+                .then(transfer => {
                   if (transfer && transfer.transcription_language && transfer.transcription_language !== 'xx') {
                     console.log(`🎙️  Auto-transcribing in ${transfer.transcription_language} (fallback)`);
                     
-                    if (!happyscribeService.isHappyScribeConfigured()) {
-                      return;
-                    }
-                    
-                    let mediaFileUrl = outputPath;
-                    if (mediaFileUrl.startsWith('s3://')) {
+                    setImmediate(async () => {
                       try {
-                        const urlParts = mediaFileUrl.replace('s3://', '').split('/');
-                        const bucket = urlParts[0];
-                        const key = urlParts.slice(1).join('/');
+                        if (!happyscribeService.isHappyScribeConfigured()) {
+                          return;
+                        }
                         
-                        const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
-                        mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
-                      } catch (urlErr) {
-                        console.warn(`Failed to create presigned URL for fallback: ${urlErr.message}`);
+                        let mediaFileUrl = outputPath;
+                        if (mediaFileUrl.startsWith('s3://')) {
+                          try {
+                            const urlParts = mediaFileUrl.replace('s3://', '').split('/');
+                            const bucket = urlParts[0];
+                            const key = urlParts.slice(1).join('/');
+                            
+                            const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
+                            mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+                          } catch (urlErr) {
+                            // ignore
+                          }
+                        }
+                        
+                        const result = await happyscribeService.createTranscriptionOrder(
+                          mediaFileUrl,
+                          outputKey,
+                          { service: 'auto', language: transfer.transcription_language, transferId, jobId, sourceType: 'mediaconvert' }
+                        );
+                        
+                        console.log(`✅ Auto-transcription order created (fallback): ${result.orderId}`);
+                      } catch (err) {
+                        // ignore fallback errors
                       }
-                    }
-                    
-                    const result = await happyscribeService.createTranscriptionOrder(
-                      mediaFileUrl,
-                      outputKey,
-                      { service: 'auto', language: transfer.transcription_language, transferId, jobId, sourceType: 'mediaconvert' }
-                    );
-                    
-                    console.log(`✅ Auto-transcription order created (fallback): ${result.orderId}`);
+                    });
                   }
-                } catch (err) {
-                  console.warn(`Auto-transcription fallback failed: ${err.message}`);
-                }
-              });
+                })
+                .catch(err => {/* ignore */});
             }
           });
       } else {
