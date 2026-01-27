@@ -3238,6 +3238,43 @@ app.post('/transcribe/order/:orderId/upload-srt-to-frameio', async (req, res) =>
 });
 
 /**
+ * POST /test/upload-srt-test
+ * Test endpoint to upload a test SRT file to Frame.io
+ */
+app.post('/test/upload-srt-test', async (req, res) => {
+  try {
+    const testSRT = `1
+00:00:00,000 --> 00:00:03,000
+This is a test subtitle.
+
+2
+00:00:03,000 --> 00:00:06,000
+This is the second subtitle.
+
+3
+00:00:06,000 --> 00:00:10,000
+And this is the third one.`;
+
+    const srtResult = await uploadSRTToFrameIO(testSRT, 'test-video', 'jojrpvchsgijjku');
+
+    if (!srtResult) {
+      return res.status(500).json({ error: 'Failed to upload test SRT' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Test SRT uploaded successfully',
+      srtAssetId: srtResult.id,
+      srtFilename: srtResult.filename,
+      srtSize: srtResult.size
+    });
+  } catch (err) {
+    console.error('Test SRT upload error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /transcribe/download/{orderId}
  * Download transcript in specified format
  */
