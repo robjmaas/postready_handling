@@ -2497,15 +2497,20 @@ async function uploadSRTToFrameIO(srtContent, filename, transferId) {
     
     console.log(`   Step 3: Parent asset ID: ${parentAssetId}`);
     
-    // Step 2: Create asset in target folder
+    // Step 2: Create asset in target folder (post to /assets endpoint, not parent)
     const srtFilename = `${filename}.srt`;
     const assetPayload = {
       name: srtFilename,
-      type: "file"
+      type: "file",
+      parent: {
+        id: parentAssetId
+      }
     };
     
+    console.log(`   Step 4: Creating SRT asset with parent ${parentAssetId}...`);
+    
     const createAssetRes = await fetch(
-      `https://api.frame.io/v2/assets/${parentAssetId}`,
+      `https://api.frame.io/v2/assets`,
       {
         method: "POST",
         headers: {
@@ -2517,6 +2522,8 @@ async function uploadSRTToFrameIO(srtContent, filename, transferId) {
     );
 
     if (!createAssetRes.ok) {
+      const errorData = await createAssetRes.text();
+      console.log(`   Error response: ${errorData}`);
       throw new Error(`Failed to create SRT asset: ${createAssetRes.status}`);
     }
 
