@@ -186,7 +186,8 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS processed_transfers (
       id TEXT PRIMARY KEY,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      status TEXT DEFAULT 'processing'
+      status TEXT DEFAULT 'processing',
+      transcription_language TEXT
     );
     
     CREATE TABLE IF NOT EXISTS coconut_jobs (
@@ -2645,10 +2646,15 @@ app.post("/transfer/:transferId/auto-detect-audio", async (req, res) => {
 app.post("/process/transfer/:transferId", async (req, res) => {
   try {
     const { transferId } = req.params;
-    const { templateName = "Postready" } = req.body; // Allow specifying job template
+    const { templateName = "Postready", transcriptionLanguage = null } = req.body; // Allow specifying job template and transcription language
     
     console.log(`\n📌 PROCESSING STARTED FOR TRANSFER: ${transferId}`);
     console.log(`   Job Template: ${templateName}`);
+    if (transcriptionLanguage && transcriptionLanguage !== 'xx') {
+      console.log(`   Transcription Language: ${transcriptionLanguage}`);
+    } else if (transcriptionLanguage === 'xx') {
+      console.log(`   Transcription: DISABLED`);
+    }
     
     // Check if already processed
     if (await isTransferProcessed(transferId)) {
@@ -2660,8 +2666,14 @@ app.post("/process/transfer/:transferId", async (req, res) => {
       });
     }
     
-    // Mark as processing to avoid duplicates
+    // Mark as processing to avoid duplicates, and store transcription language preference
     await markTransferProcessed(transferId);
+    if (transcriptionLanguage && transcriptionLanguage !== 'xx') {
+      await db.run(
+        "UPDATE processed_transfers SET transcription_language = ? WHERE id = ?",
+        [transcriptionLanguage, transferId]
+      );
+    }
     
     // Return immediately - start processing in background (don't await)
     // This prevents blocking health checks during large file uploads
@@ -2676,6 +2688,7 @@ app.post("/process/transfer/:transferId", async (req, res) => {
       message: "Transfer processing started in background",
       transferId,
       templateName,
+      transcriptionLanguage: transcriptionLanguage || null,
       note: "Large file uploads may take 10-30+ minutes. Check /db/jobs/{transferId} for status.",
       timestamp: new Date().toISOString()
     });
@@ -4011,16 +4024,105 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
                   uploadAudioFilesForTransfer(transferId)
                     .catch(err => console.warn(`Audio upload failed: ${err.message}`));
                 }
+                
+                // Auto-transcribe if language preference is set
+                if (transferId) {
+                  db.get("SELECT transcription_language FROM processed_transfers WHERE id = ?", [transferId])
+                    .then(transfer => {
+                      if (transfer && transfer.transcription_language && transfer.transcription_language !== 'xx') {
+                        console.log(`🎙️  Auto-transcribing in ${transfer.transcription_language}...`);
+                        
+                        // Trigger transcription asynchronously (don't block webhook response)
+                        setImmediate(async () => {
+                          try {
+                            if (!happyscribeService.isHappyScribeConfigured()) {
+                              console.warn(`⚠️  Happy Scribe not configured, skipping auto-transcription`);
+                              return;
+                            }
+                            
+                            let mediaFileUrl = outputPath;
+                            
+                            // Convert S3 URL to presigned HTTPS URL for Happy Scribe API
+                            if (mediaFileUrl.startsWith('s3://')) {
+                              try {
+                                const urlParts = mediaFileUrl.replace('s3://', '').split('/');
+                                const bucket = urlParts[0];
+                                const key = urlParts.slice(1).join('/');
+                                
+                                const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
+                                mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+                                console.log(`   ✅ Presigned URL created for transcription`);
+                              } catch (urlErr) {
+                                console.error(`   ⚠️  Failed to create presigned URL: ${urlErr.message}`);
+                              }
+                            }
+                            
+                            const result = await happyscribeService.createTranscriptionOrder(
+                              mediaFileUrl,
+                              outputKey,
+                              { service: 'auto', language: transfer.transcription_language, transferId, jobId, sourceType: 'mediaconvert' }
+                            );
+                            
+                            console.log(`✅ Auto-transcription order created: ${result.orderId}`);
+                          } catch (err) {
+                            console.error(`❌ Auto-transcription failed: ${err.message}`);
+                          }
+                        });
+                      }
+                    })
+                    .catch(err => console.warn(`Failed to check transcription language: ${err.message}`));
+                }
               })
               .catch(err => console.warn(`Frame.io upload failed: ${err.message}`));
           })
           .catch(err => {
             console.error(`❌ Failed to get signed URL: ${err.message}`);
             updateCoconutJob(jobId, "completed", outputPath);
-            // Still try audio upload
+            // Still try audio upload and transcription
             if (transferId) {
               uploadAudioFilesForTransfer(transferId)
                 .catch(err => console.warn(`Audio upload failed: ${err.message}`));
+              
+              // Still try auto-transcription
+              db.get("SELECT transcription_language FROM processed_transfers WHERE id = ?", [transferId])
+                .then(transfer => {
+                  if (transfer && transfer.transcription_language && transfer.transcription_language !== 'xx') {
+                    console.log(`🎙️  Auto-transcribing in ${transfer.transcription_language} (fallback)`);
+                    
+                    setImmediate(async () => {
+                      try {
+                        if (!happyscribeService.isHappyScribeConfigured()) {
+                          return;
+                        }
+                        
+                        let mediaFileUrl = outputPath;
+                        if (mediaFileUrl.startsWith('s3://')) {
+                          try {
+                            const urlParts = mediaFileUrl.replace('s3://', '').split('/');
+                            const bucket = urlParts[0];
+                            const key = urlParts.slice(1).join('/');
+                            
+                            const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
+                            mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+                          } catch (urlErr) {
+                            // ignore
+                          }
+                        }
+                        
+                        const result = await happyscribeService.createTranscriptionOrder(
+                          mediaFileUrl,
+                          outputKey,
+                          { service: 'auto', language: transfer.transcription_language, transferId, jobId, sourceType: 'mediaconvert' }
+                        );
+                        
+                        console.log(`✅ Auto-transcription order created (fallback): ${result.orderId}`);
+                      } catch (err) {
+                        // ignore fallback errors
+                      }
+                    });
+                  }
+                })
+                .catch(err => {/* ignore */});
             }
           });
       } else {
