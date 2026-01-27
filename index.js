@@ -6,6 +6,7 @@ import sqlite3 from "sqlite3";
 import { open } from "sqlite";
 import fs from "fs";
 import path from "path";
+import happyscribeService from "./happyscribe-service.js";
 import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
@@ -234,6 +235,40 @@ async function initDb() {
       folder_id TEXT NOT NULL,
       root_asset_id TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS happy_scribe_orders (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT,
+      job_id TEXT,
+      organization_id TEXT,
+      order_id TEXT,
+      source_type TEXT,
+      source_url TEXT,
+      language TEXT,
+      state TEXT DEFAULT 'pending',
+      exported_formats TEXT,
+      transcript_json_url TEXT,
+      transcript_vtt_url TEXT,
+      transcript_srt_url TEXT,
+      error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME,
+      updated_at DATETIME,
+      FOREIGN KEY(transfer_id) REFERENCES processed_transfers(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS happy_scribe_translations (
+      id TEXT PRIMARY KEY,
+      order_id TEXT,
+      source_transcription_id TEXT,
+      target_language TEXT,
+      state TEXT DEFAULT 'pending',
+      translated_transcription_id TEXT,
+      error TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      completed_at DATETIME,
+      FOREIGN KEY(order_id) REFERENCES happy_scribe_orders(id)
     );
   `);
 
@@ -2832,6 +2867,320 @@ app.delete("/transfer/:transferId/audio/:audioId", async (req, res) => {
     });
   } catch (err) {
     console.error("Audio removal error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ==================== HAPPY SCRIBE TRANSCRIPTION/TRANSLATION ==================== */
+
+/**
+ * POST /transcribe/transfer/{transferId}
+ * Create a transcription order for a transfer
+ */
+app.post('/transcribe/transfer/:transferId', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { service = 'auto', language = 'en', sourceType = 'mediaconvert' } = req.body || {};
+
+    if (!happyscribeService.isHappyScribeConfigured()) {
+      return res.status(400).json({
+        error: 'Happy Scribe not configured - missing API key or org ID'
+      });
+    }
+
+    // Get the job for this transfer
+    const jobs = await db.all(
+      `SELECT id, filename, output_url FROM coconut_jobs WHERE transfer_id = ? AND status = 'completed'`,
+      [transferId]
+    );
+
+    if (!jobs.length) {
+      return res.status(404).json({
+        error: 'No completed jobs found for this transfer'
+      });
+    }
+
+    const job = jobs[0];
+    const mediaFileUrl = job.output_url || `s3://postready-staging/outputs/${job.filename}.mp4`;
+
+    // Create order
+    const result = await happyscribeService.createTranscriptionOrder(
+      mediaFileUrl,
+      job.filename,
+      { service, language, transferId, jobId: job.id, sourceType }
+    );
+
+    res.json({
+      success: true,
+      orderId: result.orderId,
+      state: result.state,
+      estimatedCompletionMs: result.estimatedCompletionMs,
+      transferId
+    });
+  } catch (err) {
+    console.error('Transcription order error:', err);
+    res.status(500).json({
+      error: err.message
+    });
+  }
+});
+
+/**
+ * POST /transcribe/job/{jobId}
+ * Create a transcription order for a specific MediaConvert job
+ */
+app.post('/transcribe/job/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const { service = 'auto', language = 'en' } = req.body || {};
+
+    if (!happyscribeService.isHappyScribeConfigured()) {
+      return res.status(400).json({ error: 'Happy Scribe not configured' });
+    }
+
+    // Get job details
+    const job = await db.get(
+      `SELECT transfer_id, filename FROM coconut_jobs WHERE id = ?`,
+      [jobId]
+    );
+
+    if (!job) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    // Assume S3 output URL follows convention
+    const mediaFileUrl = `s3://postready-staging/outputs/${job.filename}.mp4`;
+
+    const result = await happyscribeService.createTranscriptionOrder(
+      mediaFileUrl,
+      job.filename,
+      { service, language, transferId: job.transfer_id, jobId }
+    );
+
+    res.json({
+      success: true,
+      orderId: result.orderId,
+      state: result.state,
+      jobId
+    });
+  } catch (err) {
+    console.error('Transcription order error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /transcribe/order/{orderId}
+ * Get transcription order status
+ */
+app.get('/transcribe/order/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const status = await happyscribeService.getTranscriptionOrderStatus(orderId);
+
+    res.json({
+      success: true,
+      ...status
+    });
+  } catch (err) {
+    console.error('Get transcription status error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /transcribe/download/{orderId}
+ * Download transcript in specified format
+ */
+app.get('/transcribe/download/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { format = 'vtt', redirect = 'true' } = req.query;
+
+    const downloads = await happyscribeService.downloadTranscripts(orderId, [format]);
+
+    if (!downloads[format]) {
+      return res.status(404).json({
+        error: `No download available for format: ${format}`
+      });
+    }
+
+    if (redirect === 'true') {
+      return res.redirect(downloads[format]);
+    } else {
+      return res.json({
+        success: true,
+        orderId,
+        format,
+        downloadUrl: downloads[format]
+      });
+    }
+  } catch (err) {
+    console.error('Download transcript error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /translate/order/{orderId}
+ * Create translation order from transcription
+ */
+app.post('/translate/order/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { targetLanguages = [], service = 'auto' } = req.body || {};
+
+    if (!happyscribeService.isHappyScribeConfigured()) {
+      return res.status(400).json({ error: 'Happy Scribe not configured' });
+    }
+
+    if (!targetLanguages.length) {
+      return res.status(400).json({
+        error: 'targetLanguages array required in body'
+      });
+    }
+
+    const status = await happyscribeService.getTranscriptionOrderStatus(orderId);
+
+    if (!status.transcriptions?.length) {
+      return res.status(400).json({
+        error: 'No transcriptions found - order may not be complete'
+      });
+    }
+
+    const sourceTranscriptionId = status.transcriptions[0].uuid;
+
+    const result = await happyscribeService.createTranslationOrder(
+      sourceTranscriptionId,
+      targetLanguages,
+      { service }
+    );
+
+    res.json({
+      success: true,
+      orderId: result.orderId,
+      state: result.state,
+      targetLanguages,
+      outputIds: result.outputIds
+    });
+  } catch (err) {
+    console.error('Translation order error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /translate/order/{orderId}
+ * Get translation order status
+ */
+app.get('/translate/order/:orderId', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const status = await happyscribeService.getTranslationOrderStatus(orderId);
+
+    res.json({
+      success: true,
+      ...status
+    });
+  } catch (err) {
+    console.error('Get translation status error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /webhooks/happyscribe
+ * Handle Happy Scribe webhooks
+ */
+app.post('/webhooks/happyscribe', async (req, res) => {
+  try {
+    const signature = req.headers['x-happyscribe-signature'] || '';
+    const payload = req.body;
+
+    console.log(`📨 Happy Scribe webhook: ${payload.id} -> ${payload.state}`);
+
+    const verified = happyscribeService.verifyHappyScribeWebhookSignature(
+      JSON.stringify(payload),
+      signature
+    );
+
+    if (!verified) {
+      console.warn(`⚠️  Invalid Happy Scribe webhook signature`);
+    }
+
+    const result = await happyscribeService.handleHappyScribeWebhook(payload);
+
+    res.json(result);
+  } catch (err) {
+    console.error('Happy Scribe webhook error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});
+
+/**
+ * GET /transcribe/list/{transferId}
+ * List all transcription orders for a transfer
+ */
+app.get('/transcribe/list/:transferId', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+
+    const orders = await db.all(
+      `SELECT id, order_id, source_type, language, state, created_at, completed_at 
+       FROM happy_scribe_orders 
+       WHERE transfer_id = ? 
+       ORDER BY created_at DESC`,
+      [transferId]
+    );
+
+    res.json({
+      success: true,
+      transferId,
+      count: orders.length,
+      orders
+    });
+  } catch (err) {
+    console.error('List transcriptions error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /transcribe/stats
+ * Get Happy Scribe usage statistics
+ */
+app.get('/transcribe/stats', async (req, res) => {
+  try {
+    const total = await db.get(
+      `SELECT COUNT(*) as count FROM happy_scribe_orders`
+    );
+
+    const byState = await db.all(
+      `SELECT state, COUNT(*) as count FROM happy_scribe_orders GROUP BY state`
+    );
+
+    const completed = await db.get(
+      `SELECT COUNT(*) as count FROM happy_scribe_orders WHERE state = 'fulfilled'`
+    );
+
+    const failed = await db.get(
+      `SELECT COUNT(*) as count FROM happy_scribe_orders WHERE state = 'failed'`
+    );
+
+    res.json({
+      success: true,
+      total: total?.count || 0,
+      completed: completed?.count || 0,
+      failed: failed?.count || 0,
+      byState: byState || []
+    });
+  } catch (err) {
+    console.error('Stats error:', err);
     res.status(500).json({ error: err.message });
   }
 });
