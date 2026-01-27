@@ -385,6 +385,12 @@ export async function downloadSRT(orderId) {
     throw err;
   }
 }
+
+/**
+ * Create translation order
+ */
+export async function createTranslationOrder(sourceTranscriptionId, targetLanguages, options = {}) {
+  try {
     if (!isHappyScribeConfigured()) {
       throw new Error('Happy Scribe not configured');
     }
