@@ -2901,7 +2901,24 @@ app.post('/transcribe/transfer/:transferId', async (req, res) => {
     }
 
     const job = jobs[0];
-    const mediaFileUrl = job.output_url || `s3://postready-staging/outputs/${job.filename}.mp4`;
+    let mediaFileUrl = job.output_url || `s3://postready-staging/outputs/${job.filename}.mp4`;
+
+    // Convert S3 URL to presigned HTTPS URL for Happy Scribe API
+    if (mediaFileUrl.startsWith('s3://')) {
+      try {
+        console.log(`📝 Converting S3 URL to presigned HTTPS for Happy Scribe...`);
+        const urlParts = mediaFileUrl.replace('s3://', '').split('/');
+        const bucket = urlParts[0];
+        const key = urlParts.slice(1).join('/');
+        
+        const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
+        mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+        console.log(`   ✅ Presigned URL created (24 hour expiration)`);
+      } catch (urlErr) {
+        console.error(`   ⚠️  Failed to create presigned URL: ${urlErr.message}`);
+        console.error(`   Attempting with S3 URL (may fail)`);
+      }
+    }
 
     // Create order
     const result = await happyscribeService.createTranscriptionOrder(
@@ -2949,7 +2966,24 @@ app.post('/transcribe/job/:jobId', async (req, res) => {
     }
 
     // Assume S3 output URL follows convention
-    const mediaFileUrl = `s3://postready-staging/outputs/${job.filename}.mp4`;
+    let mediaFileUrl = `s3://postready-staging/outputs/${job.filename}.mp4`;
+
+    // Convert S3 URL to presigned HTTPS URL for Happy Scribe API
+    if (mediaFileUrl.startsWith('s3://')) {
+      try {
+        console.log(`📝 Converting S3 URL to presigned HTTPS for Happy Scribe...`);
+        const urlParts = mediaFileUrl.replace('s3://', '').split('/');
+        const bucket = urlParts[0];
+        const key = urlParts.slice(1).join('/');
+        
+        const getCommand = new GetObjectCommand({ Bucket: bucket, Key: key });
+        mediaFileUrl = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+        console.log(`   ✅ Presigned URL created (24 hour expiration)`);
+      } catch (urlErr) {
+        console.error(`   ⚠️  Failed to create presigned URL: ${urlErr.message}`);
+        console.error(`   Attempting with S3 URL (may fail)`);
+      }
+    }
 
     const result = await happyscribeService.createTranscriptionOrder(
       mediaFileUrl,
