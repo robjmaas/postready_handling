@@ -394,21 +394,16 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
       } : undefined
     });
 
-    // Get the Frame.io folder ID and review link for this transfer
+    // Get the Frame.io review link for this transfer
     let frameioLink = `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}`;
     if (global.db) {
       const folderRecord = await global.db.get(
-        `SELECT folder_id, share_link FROM frameio_transfer_folders WHERE transfer_id = ?`,
+        `SELECT share_link FROM frameio_transfer_folders WHERE transfer_id = ?`,
         [transferId]
       );
-      if (folderRecord) {
-        // Prefer public review link if available
-        if (folderRecord.share_link) {
-          frameioLink = folderRecord.share_link;
-        } else if (folderRecord.folder_id) {
-          // Fallback to folder link
-          frameioLink = `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}/folders/${folderRecord.folder_id}`;
-        }
+      if (folderRecord && folderRecord.share_link) {
+        // Use public review link if available
+        frameioLink = folderRecord.share_link;
       }
     }
     
