@@ -422,10 +422,18 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
             const transcriptionUuid = status.transcriptions[0].uuid;
             // Link to Happy Scribe transcription editor with organization_id
             happyscribeLink = `https://www.happyscribe.com/transcriptions/${transcriptionUuid}/edit?organization_id=${order.organization_id}`;
-            console.log(`   📝 Happy Scribe link: ${happyscribeLink}`);
+            console.log(`   📝 Happy Scribe link (with UUID): ${happyscribeLink}`);
+          } else {
+            // Fallback: use order_id if no transcription UUID available
+            // This can happen if order is still being processed or if the API doesn't return UUID
+            happyscribeLink = `https://www.happyscribe.com/transcriptions/${order.order_id}/edit?organization_id=${order.organization_id}`;
+            console.log(`   📝 Happy Scribe link (fallback to order_id): ${happyscribeLink}`);
           }
         } catch (hsErr) {
-          console.warn(`   ⚠️  Could not fetch Happy Scribe transcription UUID: ${hsErr.message}`);
+          console.warn(`   ⚠️  Could not fetch Happy Scribe status: ${hsErr.message}`);
+          // Last resort fallback: still provide a link using order_id
+          happyscribeLink = `https://www.happyscribe.com/transcriptions/${order.order_id}/edit?organization_id=${order.organization_id}`;
+          console.log(`   📝 Happy Scribe link (error fallback): ${happyscribeLink}`);
         }
       }
     }
