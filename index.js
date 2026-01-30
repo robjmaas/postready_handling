@@ -3376,6 +3376,17 @@ app.post('/transcribe/transfer/:transferId', async (req, res) => {
       { service, language, transferId, jobId: job.id, sourceType }
     );
 
+    // Ensure transfer is in processed_transfers so email polling can find it
+    try {
+      await db.run(
+        "INSERT OR IGNORE INTO processed_transfers (id, status, transcription_language) VALUES (?, ?, ?)",
+        [transferId, "processing", language]
+      );
+      console.log(`   ✅ Added transfer to processed_transfers for email polling`);
+    } catch (dbErr) {
+      console.warn(`   ⚠️  Could not add transfer to processed_transfers: ${dbErr.message}`);
+    }
+
     res.json({
       success: true,
       orderId: result.orderId,
