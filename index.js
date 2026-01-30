@@ -411,13 +411,22 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
     let happyscribeLink = null;
     if (global.db) {
       const order = await global.db.get(
-        `SELECT order_id FROM happy_scribe_orders WHERE transfer_id = ? ORDER BY created_at DESC LIMIT 1`,
+        `SELECT order_id, organization_id FROM happy_scribe_orders WHERE transfer_id = ? ORDER BY created_at DESC LIMIT 1`,
         [transferId]
       );
       if (order) {
-        // Link to Happy Scribe transcription editor
-        happyscribeLink = `https://www.happyscribe.com/transcriptions/${order.order_id}`;
-        console.log(`   📝 Happy Scribe link: ${happyscribeLink}`);
+        // Get transcription UUID from Happy Scribe API
+        try {
+          const status = await happyscribeService.getTranscriptionOrderStatus(order.order_id);
+          if (status.transcriptions && status.transcriptions.length > 0) {
+            const transcriptionUuid = status.transcriptions[0].uuid;
+            // Link to Happy Scribe transcription editor with organization_id
+            happyscribeLink = `https://www.happyscribe.com/transcriptions/${transcriptionUuid}/edit?organization_id=${order.organization_id}`;
+            console.log(`   📝 Happy Scribe link: ${happyscribeLink}`);
+          }
+        } catch (hsErr) {
+          console.warn(`   ⚠️  Could not fetch Happy Scribe transcription UUID: ${hsErr.message}`);
+        }
       }
     }
     
