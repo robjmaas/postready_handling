@@ -458,3 +458,65 @@ transfer_audio_mapping:
 - Wasabi bucket credentials or region
 - Adding new external integrations
 - Audio sync issues or timecode mismatches
+### Recovery & Restoration Guide
+
+**Current Stable State (as of 2026-01-30):**
+- Commit: `154a755` (full: `154a755f921f5e07e856213648f1c9eca9269e3d`)
+- All systems working: MediaConvert → Frame.io → Happy Scribe → Email automation
+
+**How to Restore if Something Breaks:**
+
+**Option 1: Reset Code to Stable Commit (Local)**
+```bash
+cd /Users/robmaas/Desktop/iMac/Projects/postready_handling
+
+# View what changed since stable state
+git diff 154a755..HEAD
+
+# Restore to stable commit (soft reset - keeps files)
+git reset --soft 154a755
+
+# OR hard reset (discards uncommitted changes)
+git reset --hard 154a755
+
+# Re-deploy to production
+fly deploy
+```
+
+**Option 2: Create Backup Branch**
+```bash
+# Backup current state before making changes
+git checkout -b backup-stable-2026-01-30
+git checkout main
+
+# Now you always have a backup branch to return to
+```
+
+**Option 3: Rollback Fly.io Deployment Only**
+```bash
+# Check deployment history
+fly releases -a postready-handling
+
+# Rollback to previous version without code reset
+fly releases rollback -a postready-handling
+```
+
+**Quick Recovery Checklist:**
+1. Check logs: `fly logs -a postready-handling`
+2. Identify issue (code or deployment)
+3. For code issues: `git reset --hard 154a755`
+4. For deployment issues: `fly releases rollback`
+5. Redeploy if needed: `fly deploy`
+6. Test: Process small transfer (jojrpvchsgijjku - 9.7 MB)
+7. Verify: `curl https://postready-handling.fly.dev/health`
+
+**Recent Commits in Stable Build:**
+```
+154a755 - fix: add fallback logic for Happy Scribe links when UUID not available
+758e83e - feat: update Happy Scribe link to include edit endpoint and organization_id
+d273f86 - fix: simplify Frame.io link to project level without /folders/ path
+ae15178 - feat: send Happy Scribe transcription link instead of SRT attachment
+3d46ad7 - Allow videoUrl in /transcribe/transfer body for flexible transcription
+```
+
+All code is backed up on GitHub (https://github.com/robjmaas/postready_handling) and deployed to Fly.io.
