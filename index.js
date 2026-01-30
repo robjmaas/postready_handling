@@ -3328,7 +3328,7 @@ app.delete("/transfer/:transferId/audio/:audioId", async (req, res) => {
 app.post('/transcribe/transfer/:transferId', async (req, res) => {
   try {
     const { transferId } = req.params;
-    const { service = 'auto', language = 'en', sourceType = 'mediaconvert' } = req.body || {};
+    const { videoUrl, service = 'auto', language = 'en', sourceType = 'mediaconvert' } = req.body || {};
 
     if (!happyscribeService.isHappyScribeConfigured()) {
       return res.status(400).json({
@@ -3336,20 +3336,30 @@ app.post('/transcribe/transfer/:transferId', async (req, res) => {
       });
     }
 
-    // Get the job for this transfer
-    const jobs = await db.all(
-      `SELECT id, filename, output_url FROM coconut_jobs WHERE transfer_id = ? AND status = 'completed'`,
-      [transferId]
-    );
+    let mediaFileUrl = videoUrl;
+    let filename = transferId;
 
-    if (!jobs.length) {
-      return res.status(404).json({
-        error: 'No completed jobs found for this transfer'
-      });
+    // If no videoUrl provided, try to find completed jobs
+    if (!mediaFileUrl) {
+      // Try coconut_jobs first
+      const jobs = await db.all(
+        `SELECT id, filename, output_url FROM coconut_jobs WHERE transfer_id = ? AND status = 'completed'`,
+        [transferId]
+      );
+
+      if (jobs.length) {
+        const job = jobs[0];
+        mediaFileUrl = job.output_url || `s3://postready-staging/outputs/${job.filename}.mp4`;
+        filename = job.filename;
+      } else {
+        return res.status(404).json({
+          error: 'No completed jobs found for this transfer. Provide videoUrl in request body.',
+          note: 'POST body: { "videoUrl": "s3://bucket/key", "language": "en" }'
+        });
+      }
+    } else {
+      filename = `${transferId}-video`;
     }
-
-    const job = jobs[0];
-    let mediaFileUrl = job.output_url || `s3://postready-staging/outputs/${job.filename}.mp4`;
 
     // Convert S3 URL to presigned HTTPS URL for Happy Scribe API
     if (mediaFileUrl.startsWith('s3://')) {
@@ -3372,8 +3382,8 @@ app.post('/transcribe/transfer/:transferId', async (req, res) => {
     global.db = db;  // Set global.db for happyscribeService to access the database
     const result = await happyscribeService.createTranscriptionOrder(
       mediaFileUrl,
-      job.filename,
-      { service, language, transferId, jobId: job.id, sourceType }
+      filename,
+      { service, language, transferId, sourceType }
     );
 
     // Ensure transfer is in processed_transfers so email polling can find it
