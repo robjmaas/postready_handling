@@ -375,7 +375,7 @@ try {
 
 /**
  * Email Helper Function
- * Sends completion email with Frame.io project link and SRT file
+ * Sends completion email with Frame.io project link and Happy Scribe transcription link
  */
 async function sendCompletionEmail(transferId, srtContent, srtFilename) {
   try {
@@ -412,28 +412,17 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
       }
     }
     
-    // Generate S3 presigned URL for SRT if available
-    let srtDownloadLink = null;
-    if (srtContent && srtContent.length > 0) {
-      try {
-        const srtKey = `srt-files/${transferId}/${srtFilename}`;
-        // Upload SRT to S3
-        await s3Client.send(new PutObjectCommand({
-          Bucket: AWS_S3_BUCKET,
-          Key: srtKey,
-          Body: srtContent,
-          ContentType: "text/plain"
-        }));
-        
-        // Generate presigned URL (24 hour expiration)
-        const getCommand = new GetObjectCommand({
-          Bucket: AWS_S3_BUCKET,
-          Key: srtKey
-        });
-        srtDownloadLink = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
-        console.log(`   📥 SRT uploaded to S3: ${srtKey}`);
-      } catch (s3Err) {
-        console.warn(`   ⚠️  Could not upload SRT to S3: ${s3Err.message}`);
+    // Get Happy Scribe transcription link if available
+    let happyscribeLink = null;
+    if (global.db) {
+      const order = await global.db.get(
+        `SELECT order_id FROM happy_scribe_orders WHERE transfer_id = ? ORDER BY created_at DESC LIMIT 1`,
+        [transferId]
+      );
+      if (order) {
+        // Link to Happy Scribe transcription editor
+        happyscribeLink = `https://www.happyscribe.com/transcriptions/${order.order_id}`;
+        console.log(`   📝 Happy Scribe link: ${happyscribeLink}`);
       }
     }
     
@@ -447,13 +436,13 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
         <p><strong>Status:</strong> ✅ Completed</p>
         
         <h3>Frame.io Review Link</h3>
-        <p><a href="${frameioLink}">Share for review</a></p>
+        <p><a href="${frameioLink}">📹 View videos in Frame.io</a></p>
         
-        <h3>Files</h3>
-        <ul>
-          <li>Transcoded Video: Available in Frame.io</li>
-          ${srtDownloadLink ? `<li>SRT Subtitles: <a href="${srtDownloadLink}">Download</a></li>` : ''}
-        </ul>
+        <h3>Transcription</h3>
+        ${happyscribeLink ? 
+          `<p><a href="${happyscribeLink}">📝 Edit transcription in Happy Scribe</a></p>
+           <p style="color: #666; font-size: 12px;">You can view, edit, and export your transcription (SRT, VTT, PDF, etc.) directly in Happy Scribe.</p>` 
+          : '<p style="color: #999;">No transcription available for this transfer.</p>'}
         
         <p><em>Sent at ${new Date().toISOString()}</em></p>
       `,
@@ -464,8 +453,8 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
     console.log(`✅ Completion email sent to ${EMAIL_TO}`);
     console.log(`   Transfer: ${transferId}`);
     console.log(`   Frame.io link: ${frameioLink}`);
-    if (srtDownloadLink) {
-      console.log(`   SRT download link: ${srtDownloadLink.substring(0, 80)}...`);
+    if (happyscribeLink) {
+      console.log(`   Happy Scribe link: ${happyscribeLink}`);
     }
     
     // Mark email as sent in database
