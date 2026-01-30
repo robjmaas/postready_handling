@@ -302,11 +302,13 @@ export async function downloadSRT(orderId) {
   try {
     const status = await getTranscriptionOrderStatus(orderId);
 
-    if (status.state !== 'fulfilled') {
+    // Accept multiple states: fulfilled, completed, done, automatic_done, or any state with transcriptions
+    const acceptableStates = ['fulfilled', 'completed', 'done', 'automatic_done', 'locked', 'incomplete'];
+    if (!acceptableStates.includes(status.state) && (!status.transcriptions || status.transcriptions.length === 0)) {
       throw new Error(`Transcription not ready (state: ${status.state})`);
     }
 
-    const transcriptionIds = status.transcriptions.map(t => t.uuid);
+    const transcriptionIds = status.transcriptions.map(t => t.uuid || t.id);
 
     if (!transcriptionIds.length) {
       throw new Error('No transcriptions found in order');
@@ -315,7 +317,43 @@ export async function downloadSRT(orderId) {
     const transcriptionId = transcriptionIds[0];
 
     console.log(`\n📥 Downloading SRT for order: ${orderId}`);
+    console.log(`   Transcription ID: ${transcriptionId}`);
 
+    // Try to fetch transcription data directly (newer API)
+    try {
+      console.log(`   Attempting to fetch transcription data directly...`);
+      const transResponse = await fetch(`${HS_API_BASE}/transcriptions/${transcriptionId}`, {
+        headers: {
+          'Authorization': `Bearer ${HAPPYSCRIBE_API_KEY}`
+        }
+      });
+
+      if (transResponse.ok) {
+        const transData = await transResponse.json();
+        console.log(`   ✅ Transcription data received (status: ${transResponse.status})`);
+        console.log(`   Available fields: ${Object.keys(transData).join(', ')}`);
+        
+        // Check if content is available
+        if (transData.content && transData.content.length > 0) {
+          console.log(`✅ Found transcription content (${transData.content.length} chars)`);
+          // Build SRT from the content or word-level data
+          const srtContent = buildSRTFromTranscription(transData);
+          if (srtContent && srtContent.length > 0) {
+            console.log(`✅ Generated SRT: ${srtContent.length} bytes`);
+            return srtContent;
+          }
+        } else {
+          console.log(`   ⚠️  No content in transcription data or content is empty`);
+        }
+      } else {
+        console.log(`   ⚠️  Transcription fetch returned ${transResponse.status}`);
+      }
+    } catch (directErr) {
+      console.log(`   Direct transcription fetch failed: ${directErr.message}, trying export API...`);
+    }
+
+    // Fallback to export API
+    console.log(`📤 Using export API...`);
     const exportPayload = {
       export: {
         format: 'srt',
@@ -341,9 +379,11 @@ export async function downloadSRT(orderId) {
     const exportData = await exportResponse.json();
     const exportId = exportData.id;
 
-    // Poll for export completion
+    // Poll for export completion - with longer wait times
     let exportStatus = null;
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 60; i++) {  // Increased polling attempts
+      await new Promise(r => setTimeout(r, 500));
+      
       const statusResponse = await fetch(`${HS_API_BASE}/exports/${exportId}`, {
         headers: {
           'Authorization': `Bearer ${HAPPYSCRIBE_API_KEY}`
@@ -357,33 +397,155 @@ export async function downloadSRT(orderId) {
       exportStatus = await statusResponse.json();
 
       if (exportStatus.state === 'ready') {
-        console.log(`✅ SRT ready, downloading...`);
+        console.log(`✅ SRT export ready`);
+        console.log(`   Download link: ${exportStatus.download_link?.substring(0, 80)}...`);
         
-        // Download the SRT file
-        const srtResponse = await fetch(exportStatus.download_link);
-        if (!srtResponse.ok) {
-          throw new Error(`Failed to download SRT: ${srtResponse.status}`);
+        // Try multiple times with increasing delays
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          const waitMs = attempt === 1 ? 2000 : 3000 * attempt;
+          console.log(`   Download attempt ${attempt} (waiting ${waitMs}ms)...`);
+          await new Promise(r => setTimeout(r, waitMs));
+          
+          const srtResponse = await fetch(exportStatus.download_link);
+          if (!srtResponse.ok) {
+            console.warn(`   ⚠️  Attempt ${attempt}: HTTP ${srtResponse.status}`);
+            continue;
+          }
+          
+          let srtContent = await srtResponse.text();
+          console.log(`   ✅ Downloaded ${srtContent.length} bytes (Content-Type: ${srtResponse.headers.get('content-type')})`);
+          
+          if (srtContent && srtContent.length > 100) {  // Require at least 100 bytes for valid SRT
+            console.log(`✅ SRT downloaded successfully (${srtContent.length} bytes)`);
+            return srtContent;
+          }
+          
+          if (srtContent.length > 0 && srtContent.length < 100) {
+            console.warn(`   ⚠️  Content too small (${srtContent.length} bytes), retrying...`);
+          }
         }
         
-        const srtContent = await srtResponse.text();
-        console.log(`✅ SRT downloaded: ${srtContent.length} bytes`);
-        
-        return srtContent;
+        throw new Error('Could not download valid SRT file after multiple attempts');
       }
 
       if (exportStatus.state === 'failed') {
         throw new Error(`SRT export failed`);
       }
 
-      // Wait before polling again
-      await new Promise(r => setTimeout(r, 500));
+      // Log progress every 10 attempts
+      if (i % 10 === 0) {
+        console.log(`   Polling... (attempt ${i}/60)`);
+      }
     }
 
-    throw new Error('SRT export timed out');
+    throw new Error('SRT export timed out after 60 polling attempts (30 seconds)');
   } catch (err) {
     console.error(`Error downloading SRT: ${err.message}`);
     throw err;
   }
+}
+
+/**
+ * Build SRT from transcription data
+ */
+function buildSRTFromTranscription(transData) {
+  // If we have structured word data with timing, use it
+  if (transData.words && Array.isArray(transData.words)) {
+    return generateSRTFromWords(transData.words);
+  }
+  
+  // Otherwise, use plain content with estimated timing
+  if (transData.content) {
+    return generateSRTFromContent(transData.content);
+  }
+  
+  return '';
+}
+
+/**
+ * Generate SRT from word-level data
+ */
+function generateSRTFromWords(words) {
+  if (!words.length) return '';
+  
+  let srtIndex = 1;
+  let currentSubtitle = [];
+  let startTime = null;
+  let endTime = null;
+  const result = [];
+  const CHARS_PER_SUBTITLE = 45; // Target ~45 chars per line
+  
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    if (!word.value) continue;
+    
+    if (startTime === null) {
+      startTime = word.startTime || 0;
+    }
+    
+    currentSubtitle.push(word.value);
+    endTime = (word.endTime || word.startTime || 0) + 100; // Add small buffer
+    
+    const currentText = currentSubtitle.join(' ');
+    const isLastWord = i === words.length - 1;
+    
+    // Create subtitle when we reach character limit or end of words
+    if (currentText.length >= CHARS_PER_SUBTITLE || isLastWord) {
+      result.push(
+        `${srtIndex++}\n` +
+        `${msToSRTTime(startTime)} --> ${msToSRTTime(endTime)}\n` +
+        `${currentText}\n\n`
+      );
+      currentSubtitle = [];
+      startTime = null;
+    }
+  }
+  
+  return result.join('');
+}
+
+/**
+ * Generate SRT from plain text content
+ */
+function generateSRTFromContent(content) {
+  if (!content || content.length === 0) return '';
+  
+  // Split by sentences and create simple subtitles
+  const sentences = (content.match(/[^.!?]+[.!?]+/g) || [content]).map(s => s.trim()).filter(Boolean);
+  
+  let srtIndex = 1;
+  let timeMs = 0;
+  const result = [];
+  const READING_SPEED_MS_PER_CHAR = 50; // ~50ms per character (medium reading speed)
+  
+  for (const sentence of sentences) {
+    const startTime = timeMs;
+    const duration = Math.max(1000, sentence.length * READING_SPEED_MS_PER_CHAR);
+    const endTime = timeMs + duration;
+    
+    result.push(
+      `${srtIndex++}\n` +
+      `${msToSRTTime(startTime)} --> ${msToSRTTime(endTime)}\n` +
+      `${sentence}\n\n`
+    );
+    
+    timeMs = endTime;
+  }
+  
+  return result.join('');
+}
+
+/**
+ * Convert milliseconds to SRT time format (HH:MM:SS,mmm)
+ */
+function msToSRTTime(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const milliseconds = Math.floor(ms % 1000);
+  
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(milliseconds).padStart(3, '0')}`;
 }
 
 /**

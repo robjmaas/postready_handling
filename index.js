@@ -11,6 +11,7 @@ import { execSync, spawn } from "child_process";
 import https from "https";
 import http from "http";
 import { Readable } from "stream";
+import nodemailer from "nodemailer";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand, CreateBucketCommand, ListObjectsV2Command, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { Upload } from "@aws-sdk/lib-storage";
@@ -32,6 +33,15 @@ const FRAMEIO_TOKEN = process.env.FRAMEIO_TOKEN || "";
 const FRAMEIO_PROJECT_ID = process.env.FRAMEIO_PROJECT_ID || "";
 const CUBE_LUT_URL = process.env.CUBE_LUT_URL || "";
 const MEDIACONVERT_WEBHOOK_URL = `${DEPLOYMENT_URL}/webhooks/mediaconvert`;
+
+// Email configuration
+const EMAIL_SMTP_HOST = process.env.EMAIL_SMTP_HOST || "";
+const EMAIL_SMTP_PORT = parseInt(process.env.EMAIL_SMTP_PORT) || 587;
+const EMAIL_SMTP_USER = process.env.EMAIL_SMTP_USER || "";
+const EMAIL_SMTP_PASS = process.env.EMAIL_SMTP_PASS || "";
+const EMAIL_FROM = process.env.EMAIL_FROM || "";
+const EMAIL_TO = process.env.EMAIL_TO || "";
+const FRAMEIO_PROJECT_URL = process.env.FRAMEIO_PROJECT_URL || `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}`;
 
 // MediaConvert settings (only transcoding service)
 const TRANSCODE_SERVICE = "mediaconvert";
@@ -235,6 +245,7 @@ async function initDb() {
       transfer_id TEXT PRIMARY KEY,
       folder_id TEXT NOT NULL,
       root_asset_id TEXT,
+      share_link TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -271,6 +282,17 @@ async function initDb() {
       completed_at DATETIME,
       FOREIGN KEY(order_id) REFERENCES happy_scribe_orders(id)
     );
+
+    CREATE TABLE IF NOT EXISTS frameio_assets (
+      id TEXT PRIMARY KEY,
+      transfer_id TEXT,
+      filename TEXT,
+      asset_id TEXT NOT NULL,
+      asset_type TEXT,
+      srt_asset_id TEXT,
+      parent_asset_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Add metadata column if it doesn't exist (for S3 staging key storage)
@@ -287,6 +309,16 @@ async function initDb() {
   try {
     await db.exec("ALTER TABLE happy_scribe_orders ADD COLUMN srt_uploaded_to_frameio BOOLEAN DEFAULT 0;");
     console.log("✅ Added srt_uploaded_to_frameio column to happy_scribe_orders table");
+  } catch (err) {
+    if (!err.message.includes("duplicate column")) {
+      console.warn(`⚠️  Migration warning: ${err.message}`);
+    }
+  }
+
+  // Add email_sent column if it doesn't exist
+  try {
+    await db.exec("ALTER TABLE processed_transfers ADD COLUMN email_sent BOOLEAN DEFAULT 0;");
+    console.log("✅ Added email_sent column to processed_transfers table");
   } catch (err) {
     if (!err.message.includes("duplicate column")) {
       console.warn(`⚠️  Migration warning: ${err.message}`);
@@ -339,6 +371,116 @@ try {
   console.log(`✅ Found ${templates.length} AWS job template(s)`);
 } catch (err) {
   console.warn(`⚠️  Could not initialize job templates: ${err.message}`);
+}
+
+/**
+ * Email Helper Function
+ * Sends completion email with Frame.io project link and SRT file
+ */
+async function sendCompletionEmail(transferId, srtContent, srtFilename) {
+  try {
+    if (!EMAIL_SMTP_HOST || !EMAIL_FROM || !EMAIL_TO) {
+      console.log(`⚠️  Email not configured - skipping email send`);
+      return false;
+    }
+
+    const transporter = nodemailer.createTransport({
+      host: EMAIL_SMTP_HOST,
+      port: EMAIL_SMTP_PORT,
+      secure: EMAIL_SMTP_PORT === 465,
+      auth: EMAIL_SMTP_USER ? {
+        user: EMAIL_SMTP_USER,
+        pass: EMAIL_SMTP_PASS
+      } : undefined
+    });
+
+    // Get the Frame.io folder ID and review link for this transfer
+    let frameioLink = `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}`;
+    if (global.db) {
+      const folderRecord = await global.db.get(
+        `SELECT folder_id, share_link FROM frameio_transfer_folders WHERE transfer_id = ?`,
+        [transferId]
+      );
+      if (folderRecord) {
+        // Prefer public review link if available
+        if (folderRecord.share_link) {
+          frameioLink = folderRecord.share_link;
+        } else if (folderRecord.folder_id) {
+          // Fallback to folder link
+          frameioLink = `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}/folders/${folderRecord.folder_id}`;
+        }
+      }
+    }
+    
+    // Generate S3 presigned URL for SRT if available
+    let srtDownloadLink = null;
+    if (srtContent && srtContent.length > 0) {
+      try {
+        const srtKey = `srt-files/${transferId}/${srtFilename}`;
+        // Upload SRT to S3
+        await s3Client.send(new PutObjectCommand({
+          Bucket: AWS_S3_BUCKET,
+          Key: srtKey,
+          Body: srtContent,
+          ContentType: "text/plain"
+        }));
+        
+        // Generate presigned URL (24 hour expiration)
+        const getCommand = new GetObjectCommand({
+          Bucket: AWS_S3_BUCKET,
+          Key: srtKey
+        });
+        srtDownloadLink = await getSignedUrl(awsS3Client, getCommand, { expiresIn: 86400 });
+        console.log(`   📥 SRT uploaded to S3: ${srtKey}`);
+      } catch (s3Err) {
+        console.warn(`   ⚠️  Could not upload SRT to S3: ${s3Err.message}`);
+      }
+    }
+    
+    const mailOptions = {
+      from: EMAIL_FROM,
+      to: EMAIL_TO,
+      subject: `✅ Postready: Transfer ${transferId} Completed`,
+      html: `
+        <h2>Transfer Processing Complete</h2>
+        <p><strong>Transfer ID:</strong> ${transferId}</p>
+        <p><strong>Status:</strong> ✅ Completed</p>
+        
+        <h3>Frame.io Review Link</h3>
+        <p><a href="${frameioLink}">Share for review</a></p>
+        
+        <h3>Files</h3>
+        <ul>
+          <li>Transcoded Video: Available in Frame.io</li>
+          ${srtDownloadLink ? `<li>SRT Subtitles: <a href="${srtDownloadLink}">Download</a></li>` : ''}
+        </ul>
+        
+        <p><em>Sent at ${new Date().toISOString()}</em></p>
+      `,
+      attachments: []
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`✅ Completion email sent to ${EMAIL_TO}`);
+    console.log(`   Transfer: ${transferId}`);
+    console.log(`   Frame.io link: ${frameioLink}`);
+    if (srtDownloadLink) {
+      console.log(`   SRT download link: ${srtDownloadLink.substring(0, 80)}...`);
+    }
+    
+    // Mark email as sent in database
+    if (global.db) {
+      await global.db.run(
+        `UPDATE processed_transfers SET email_sent = 1 WHERE id = ?`,
+        [transferId]
+      );
+    }
+    
+    return true;
+  } catch (err) {
+    console.error(`❌ Failed to send email: ${err.message}`);
+    return false;
+  }
 }
 
 const app = express();
@@ -2323,12 +2465,46 @@ async function ensureTransferFolder(rootAssetId, transferId) {
       const folderData = await createFolderRes.json();
       console.log(`   ✅ Created transfer folder: ${folderData.id}`);
       
+      // Create review link for the folder - attached to folder asset
+      let shareLink = null;
+      try {
+        console.log(`   🔗 Creating review link for folder ${folderData.id}...`);
+        const reviewLinkRes = await fetch(
+          `https://api.frame.io/v2/assets/${folderData.id}/review_links`,
+          {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              name: `Transfer ${transferId}`,
+              enable_downloading: true,
+              enable_comments: true,
+              allow_approvals: true,
+              is_public: true
+            })
+          }
+        );
+
+        if (reviewLinkRes.ok) {
+          const reviewLinkData = await reviewLinkRes.json();
+          shareLink = reviewLinkData.short_url || reviewLinkData.url;
+          console.log(`   ✅ Created review link: ${shareLink}`);
+        } else {
+          const errorText = await reviewLinkRes.text();
+          console.warn(`   ⚠️  Failed to create review link: ${reviewLinkRes.status} - ${errorText}`);
+        }
+      } catch (err) {
+        console.warn(`   ⚠️  Error creating review link: ${err.message}`);
+      }
+      
       // Save to database immediately to prevent duplicate creation from other concurrent requests
       try {
         await db.run(
-          `INSERT OR IGNORE INTO frameio_transfer_folders (transfer_id, folder_id, root_asset_id) 
-           VALUES (?, ?, ?)`,
-          [transferId, folderData.id, rootAssetId]
+          `INSERT OR IGNORE INTO frameio_transfer_folders (transfer_id, folder_id, root_asset_id, share_link) 
+           VALUES (?, ?, ?, ?)`,
+          [transferId, folderData.id, rootAssetId, shareLink]
         );
         console.log(`   💾 Saved folder ID to database`);
       } catch (err) {
@@ -2441,10 +2617,32 @@ async function uploadToFrameIO(videoUrl, filename, transferId = null) {
     }
 
     const assetData = JSON.parse(createResponseText);
-    console.log(`✅ Asset created in Frame.io root: ${assetData.id}`);
+    console.log(`✅ Asset created in Frame.io: ${assetData.id}`);
     console.log(`   Asset name: ${assetData.name}`);
     console.log(`   Status: Frame.io will download from presigned S3 URL`);
     console.log(`   ⏱️  File may take 2-5 minutes to appear on Frame.io`);
+    
+    // Track this asset in database for SRT linking later
+    if (transferId) {
+      try {
+        await db.run(
+          `INSERT INTO frameio_assets (id, transfer_id, filename, asset_id, asset_type, parent_asset_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `frameio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            transferId,
+            filename,
+            assetData.id,
+            'video',
+            parentAssetId,
+            new Date().toISOString()
+          ]
+        );
+        console.log(`   💾 Asset ID tracked in database for SRT linking`);
+      } catch (err) {
+        console.warn(`   ⚠️  Could not track asset ID: ${err.message}`);
+      }
+    }
     
     return assetData;
   } catch (err) {
@@ -2571,6 +2769,34 @@ async function uploadSRTToFrameIO(srtContent, filename, transferId) {
 
     console.log(`✅ SRT uploaded to Frame.io: ${srtAssetId}`);
     
+    // Step 5: Mark SRT asset as subtitle (no parent link yet - will link after finding video)
+    try {
+      console.log(`   Step 5: Marking asset as subtitle file...`);
+      const updateRes = await fetch(
+        `https://api.frame.io/v2/assets/${srtAssetId}`,
+        {
+          method: "PATCH",
+          headers: {
+            "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            metadata: {
+              is_subtitle: true
+            }
+          })
+        }
+      );
+      
+      if (updateRes.ok) {
+        console.log(`   ✅ Marked as subtitle`);
+      } else {
+        console.warn(`   ⚠️  Could not mark as subtitle: ${updateRes.status}`);
+      }
+    } catch (err) {
+      console.warn(`   ⚠️  Error marking as subtitle: ${err.message}`);
+    }
+    
     return {
       id: srtAssetId,
       filename: srtFilename,
@@ -2579,6 +2805,75 @@ async function uploadSRTToFrameIO(srtContent, filename, transferId) {
   } catch (err) {
     console.error(`❌ SRT upload error:`, err.message);
     return null;
+  }
+}
+
+/**
+ * Link SRT subtitle asset to its parent video asset in Frame.io
+ */
+async function linkSRTToVideo(transferId, srtAssetId) {
+  if (!transferId || !srtAssetId) {
+    console.warn(`⚠️  Missing transferId or srtAssetId for linking SRT to video`);
+    return false;
+  }
+
+  try {
+    console.log(`🔗 Linking SRT to video for transfer: ${transferId}`);
+    
+    // Find the most recent video asset for this transfer
+    const videoAsset = await db.get(
+      `SELECT asset_id, filename FROM frameio_assets 
+       WHERE transfer_id = ? AND asset_type = 'video'
+       ORDER BY created_at DESC LIMIT 1`,
+      [transferId]
+    );
+
+    if (!videoAsset) {
+      console.warn(`⚠️  No video asset found for transfer ${transferId}`);
+      return false;
+    }
+
+    console.log(`   Video asset: ${videoAsset.asset_id} (${videoAsset.filename})`);
+    console.log(`   SRT asset: ${srtAssetId}`);
+
+    // Update the video asset to include subtitle relationship
+    // In Frame.io, we add the SRT as a child with subtitle type
+    const linkRes = await fetch(
+      `https://api.frame.io/v2/assets/${videoAsset.asset_id}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Authorization": `Bearer ${FRAMEIO_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          subtitle_track_id: srtAssetId
+        })
+      }
+    );
+
+    if (linkRes.ok) {
+      console.log(`✅ Linked SRT to video`);
+      
+      // Update database to track the link
+      try {
+        await db.run(
+          `UPDATE frameio_assets SET srt_asset_id = ? WHERE asset_id = ?`,
+          [srtAssetId, videoAsset.asset_id]
+        );
+      } catch (err) {
+        console.warn(`⚠️  Could not update database: ${err.message}`);
+      }
+      
+      return true;
+    } else {
+      const errorText = await linkRes.text();
+      console.warn(`⚠️  Failed to link SRT: ${linkRes.status} - ${errorText}`);
+      return false;
+    }
+  } catch (err) {
+    console.error(`❌ Error linking SRT to video:`, err.message);
+    return false;
   }
 }
 
@@ -2785,7 +3080,8 @@ app.post("/transfer/:transferId/auto-detect-audio", async (req, res) => {
 app.post("/process/transfer/:transferId", async (req, res) => {
   try {
     const { transferId } = req.params;
-    const { templateName = "Postready", transcriptionLanguage = null } = req.body; // Allow specifying job template and transcription language
+    const { templateName = "Postready" } = req.body; // Allow specifying job template
+    const transcriptionLanguage = req.query.transcriptionLanguage || req.body.transcriptionLanguage || null; // Accept transcriptionLanguage from query param or body
     
     console.log(`\n📌 PROCESSING STARTED FOR TRANSFER: ${transferId}`);
     console.log(`   Job Template: ${templateName}`);
@@ -3073,6 +3369,7 @@ app.post('/transcribe/transfer/:transferId', async (req, res) => {
     }
 
     // Create order
+    global.db = db;  // Set global.db for happyscribeService to access the database
     const result = await happyscribeService.createTranscriptionOrder(
       mediaFileUrl,
       job.filename,
@@ -3137,6 +3434,7 @@ app.post('/transcribe/job/:jobId', async (req, res) => {
       }
     }
 
+    global.db = db;  // Set global.db for happyscribeService to access the database
     const result = await happyscribeService.createTranscriptionOrder(
       mediaFileUrl,
       job.filename,
@@ -3289,6 +3587,100 @@ And this is the third one.`;
 });
 
 /**
+ * POST /transcribe/send-completion-email/:transferId
+ * Send completion email with Frame.io project + SRT to configured email address
+ */
+app.post('/transcribe/send-completion-email/:transferId', async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const { orderId } = req.query; // Accept optional orderId query parameter
+
+    // Get the transfer
+    const transfer = await db.get(
+      "SELECT * FROM processed_transfers WHERE id = ?",
+      [transferId]
+    );
+
+    if (!transfer) {
+      return res.status(404).json({ error: 'Transfer not found' });
+    }
+
+    let order;
+    
+    // If orderId provided, use it directly
+    if (orderId) {
+      order = { order_id: orderId };
+    } else {
+      // Otherwise get the Happy Scribe order for this transfer
+      order = await db.get(
+        "SELECT * FROM happy_scribe_orders WHERE transfer_id = ? ORDER BY created_at DESC LIMIT 1",
+        [transferId]
+      );
+    }
+
+    if (!order) {
+      return res.status(404).json({ error: 'No transcription order found for this transfer' });
+    }
+
+    // Check transcription status
+    const status = await happyscribeService.getTranscriptionOrderStatus(order.order_id);
+
+    if (status.state !== 'fulfilled') {
+      return res.status(202).json({
+        success: false,
+        message: `Transcription not ready yet (status: ${status.state})`,
+        transferId
+      });
+    }
+
+    // Download SRT with retry logic
+    let srtContent = null;
+    try {
+      console.log(`📥 Attempting to download SRT for order: ${order.order_id}`);
+      srtContent = await happyscribeService.downloadSRT(order.order_id);
+      console.log(`✅ SRT downloaded successfully: ${srtContent?.length || 0} bytes`);
+    } catch (srtErr) {
+      console.error(`❌ Failed to download SRT: ${srtErr.message}`);
+      // Try one more time after a brief delay
+      try {
+        console.log(`📥 Retrying SRT download...`);
+        await new Promise(r => setTimeout(r, 2000));
+        srtContent = await happyscribeService.downloadSRT(order.order_id);
+        console.log(`✅ SRT downloaded on retry: ${srtContent?.length || 0} bytes`);
+      } catch (retryErr) {
+        console.error(`❌ SRT download retry failed: ${retryErr.message}`);
+      }
+    }
+
+    // Send email
+    const emailSent = await sendCompletionEmail(
+      transferId,
+      srtContent,
+      `${transfer.id}-transcript.srt`
+    );
+
+    if (!emailSent) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to send email - check server configuration'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Completion email sent to ${EMAIL_TO}`,
+      transferId,
+      orderId: order.order_id,
+      frameioUrl: `https://app.frame.io/projects/${FRAMEIO_PROJECT_ID}`,
+      srtIncluded: !!srtContent
+    });
+  } catch (err) {
+    console.error('Send completion email error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /transcribe/download/{orderId}
  * Download transcript in specified format
  */
@@ -3410,6 +3802,62 @@ app.post('/webhooks/happyscribe', async (req, res) => {
     }
 
     const result = await happyscribeService.handleHappyScribeWebhook(payload);
+
+    // Auto-upload SRT to Frame.io when transcription is fulfilled
+    if (payload.state === 'fulfilled') {
+      setImmediate(async () => {
+        try {
+          // Get the order from database to get transfer ID
+          const order = await db.get(
+            `SELECT transfer_id, order_id FROM happy_scribe_orders WHERE order_id = ?`,
+            [payload.id]
+          );
+
+          if (order && order.transfer_id) {
+            console.log(`🎬 Auto-uploading SRT to Frame.io for transfer: ${order.transfer_id}`);
+            
+            // Download SRT from Happy Scribe
+            const srtContent = await happyscribeService.downloadSRT(payload.id);
+            
+            if (srtContent && srtContent.length > 0) {
+              // Get video filename for SRT naming
+              const asset = await db.get(
+                `SELECT filename FROM frameio_assets WHERE transfer_id = ? AND asset_type = 'video' ORDER BY created_at DESC LIMIT 1`,
+                [order.transfer_id]
+              );
+
+              const filename = asset ? asset.filename.replace(/\.[^.]+$/, '') : payload.id;
+              
+              // Upload SRT to Frame.io
+              const srtResult = await uploadSRTToFrameIO(srtContent, filename, order.transfer_id);
+              
+              if (srtResult) {
+                // Link SRT to video
+                const linked = await linkSRTToVideo(order.transfer_id, srtResult.id);
+                
+                if (linked) {
+                  console.log(`✅ SRT uploaded and linked to video in Frame.io`);
+                  
+                  // Update database
+                  await db.run(
+                    `UPDATE happy_scribe_orders SET srt_uploaded_to_frameio = 1 WHERE order_id = ?`,
+                    [payload.id]
+                  );
+                } else {
+                  console.warn(`⚠️  SRT uploaded but linking failed`);
+                }
+              } else {
+                console.warn(`⚠️  Failed to upload SRT to Frame.io`);
+              }
+            } else {
+              console.warn(`⚠️  No SRT content generated`);
+            }
+          }
+        } catch (err) {
+          console.error(`❌ Error auto-uploading SRT: ${err.message}`);
+        }
+      });
+    }
 
     res.json(result);
   } catch (err) {
@@ -3707,6 +4155,56 @@ app.get("/db/jobs/:transferId", async (req, res) => {
       [transferId]
     );
     res.json(jobs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/frameio-folders/:transferId - Get Frame.io folder data for a transfer
+ */
+app.get("/db/frameio-folders/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const folder = await db.get(
+      "SELECT * FROM frameio_transfer_folders WHERE transfer_id = ?",
+      [transferId]
+    );
+    if (folder) {
+      res.json(folder);
+    } else {
+      res.status(404).json({ error: "No Frame.io folder found for this transfer" });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/happy-scribe-orders - Get all Happy Scribe orders
+ */
+app.get("/db/happy-scribe-orders", async (req, res) => {
+  try {
+    const orders = await db.all(
+      "SELECT * FROM happy_scribe_orders ORDER BY created_at DESC LIMIT 100"
+    );
+    res.json(orders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /db/happy-scribe-orders/:transferId - Get Happy Scribe orders for a transfer
+ */
+app.get("/db/happy-scribe-orders/:transferId", async (req, res) => {
+  try {
+    const { transferId } = req.params;
+    const orders = await db.all(
+      "SELECT * FROM happy_scribe_orders WHERE transfer_id = ? ORDER BY created_at DESC",
+      [transferId]
+    );
+    res.json(orders);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -4321,6 +4819,7 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
                           }
                         }
                         
+                        global.db = db;  // Set global.db for happyscribeService
                         const result = await happyscribeService.createTranscriptionOrder(
                           mediaFileUrl,
                           outputKey,
@@ -4375,6 +4874,7 @@ app.post("/webhooks/mediaconvert", async (req, res) => {
                           }
                         }
                         
+                        global.db = db;  // Set global.db for happyscribeService
                         const result = await happyscribeService.createTranscriptionOrder(
                           mediaFileUrl,
                           outputKey,
@@ -4953,6 +5453,9 @@ async function pollPendingMediaConvertJobs() {
                           }
                         }
                         
+                        // Set global.db for happyscribeService to access the database
+                        global.db = db;
+                        
                         const result = await happyscribeService.createTranscriptionOrder(
                           mediaFileUrl,
                           outputKey,
@@ -5034,4 +5537,70 @@ async function pollPendingMediaConvertJobs() {
 if (mediaConvertClient) {
   setInterval(() => pollPendingMediaConvertJobs(), 30 * 1000);
   console.log(`✅ MediaConvert job polling started (every 30 seconds)`);
+}
+
+/**
+ * Check for completed transcriptions and auto-send completion emails
+ */
+async function checkAndSendCompletionEmails() {
+  try {
+    // Get all transfers that have been processed but not yet emailed
+    // Include transfers with or without transcription language set
+    const pendingTransfers = await db.all(
+      "SELECT * FROM processed_transfers WHERE email_sent = 0"
+    );
+
+    for (const transfer of pendingTransfers) {
+      try {
+        // Check if there's a transcription order and if it's complete
+        const order = await db.get(
+          "SELECT * FROM happy_scribe_orders WHERE transfer_id = ? ORDER BY created_at DESC LIMIT 1",
+          [transfer.id]
+        );
+
+        let srtContent = null;
+
+        // If transcription order exists, check if it's complete
+        if (order) {
+          try {
+            const status = await happyscribeService.getTranscriptionOrderStatus(order.order_id);
+
+            if (status.state === 'fulfilled') {
+              console.log(`📧 Transcription complete for ${transfer.id}, sending email...`);
+
+              // Download SRT
+              try {
+                srtContent = await happyscribeService.downloadSRT(order.order_id);
+              } catch (srtErr) {
+                console.warn(`⚠️  Could not download SRT: ${srtErr.message}`);
+              }
+
+              // Send email with SRT
+              await sendCompletionEmail(transfer.id, srtContent, `${transfer.id}-transcript.srt`);
+            } else {
+              // Transcription not ready yet, skip this transfer
+              continue;
+            }
+          } catch (statusErr) {
+            console.warn(`⚠️  Could not check transcription status: ${statusErr.message}`);
+            continue;
+          }
+        } else {
+          // No transcription order - send email anyway (video processed without transcription)
+          console.log(`📧 No transcription order for ${transfer.id}, sending email without SRT...`);
+          await sendCompletionEmail(transfer.id, null, null);
+        }
+      } catch (err) {
+        console.error(`Error checking completion for ${transfer.id}: ${err.message}`);
+      }
+    }
+  } catch (err) {
+    console.error(`Error checking for completion emails: ${err.message}`);
+  }
+}
+
+// Start polling for completion emails every 2 minutes
+if (happyscribeService.isHappyScribeConfigured() && EMAIL_FROM && EMAIL_TO) {
+  setInterval(() => checkAndSendCompletionEmails(), 2 * 60 * 1000);
+  console.log(`✅ Completion email polling started (every 2 minutes)`);
 }
