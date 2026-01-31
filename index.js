@@ -469,18 +469,23 @@ async function sendCompletionEmail(transferId, srtContent, srtFilename) {
       console.log(`   Happy Scribe link: ${happyscribeLink}`);
     }
     
-    // Mark email as sent in database
-    if (global.db) {
-      await global.db.run(
-        `UPDATE processed_transfers SET email_sent = 1 WHERE id = ?`,
-        [transferId]
-      );
-    }
-    
     return true;
   } catch (err) {
     console.error(`❌ Failed to send email: ${err.message}`);
     return false;
+  } finally {
+    // ALWAYS mark email as sent in database, even if there was an error
+    // This prevents infinite email loops
+    if (global.db) {
+      try {
+        await global.db.run(
+          `UPDATE processed_transfers SET email_sent = 1 WHERE id = ?`,
+          [transferId]
+        );
+      } catch (dbErr) {
+        console.error(`❌ Failed to update email_sent flag: ${dbErr.message}`);
+      }
+    }
   }
 }
 
